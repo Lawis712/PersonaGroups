@@ -41,8 +41,32 @@ function movePersonas(avatars, targetId) {
 }
 
 // ========== 工具 ==========
-function getAllAvatars() { return Object.keys(power_user.personas || {}); }
-function getName(a) { return (power_user.personas || {})[a] || a; }
+// ⭐ 过滤掉损坏的 persona 数据
+function getAllAvatars() {
+    const personas = power_user.personas || {};
+    return Object.keys(personas).filter(key => {
+        // 排除明显损坏的 key（看起来不像文件名）
+        // 合法 avatar key 一般包含 . - _ 或以数字开头（如 "1762722997832-.png"）
+        if (!/[.\-_]/.test(key) && !/^\d/.test(key)) {
+            console.warn('[' + EXT_NAME + '] Skipping malformed persona key:', key);
+            return false;
+        }
+        // 排除 name 字段被污染（被塞了描述文本）的记录
+        const name = personas[key];
+        if (typeof name === 'string' && (name.length > 200 || name.includes('\n'))) {
+            console.warn('[' + EXT_NAME + '] Skipping persona with corrupted name:', key);
+            return false;
+        }
+        return true;
+    });
+}
+// ⭐ 名字防污染
+function getName(a) {
+    const raw = (power_user.personas || {})[a];
+    if (typeof raw !== 'string') return a;
+    if (raw.length > 200 || raw.includes('\n')) return a;
+    return raw || a;
+}
 function getAvatarUrl(a) { return '/thumbnail?type=persona&file=' + encodeURIComponent(a); }
 function isBound(a) {
     const desc = (power_user.persona_descriptions || {})[a];
@@ -60,9 +84,8 @@ function isBound(a) {
     if (Array.isArray(power_user.persona_locked_chats) && power_user.persona_locked_chats.includes(a)) return true;
     return false;
 }
-// 取卡片 ID：先看外层（移动端某些 ST 版本外层是过期 ID，但克隆补全后外层一定对），再看内层
+// 取卡片真实 ID：优先内层 .avatar 上的 data-avatar-id（最新），再退到外层
 function getCardAvatarId(card) {
-    // 优先内层（图片所在那个 .avatar div 上的 data-avatar-id 总是最新的）
     const inner = card.querySelector('.avatar[data-avatar-id]') || card.querySelector('[data-avatar-id]');
     if (inner && inner.dataset.avatarId) return inner.dataset.avatarId;
     if (card.dataset && card.dataset.avatarId) return card.dataset.avatarId;
@@ -412,14 +435,13 @@ async function reorganizeNative() {
     }
 }
 
-// ⭐ 修复：克隆模板时外层和内层 data-avatar-id 全部同步，并清空模板残留内容
+// ⭐ 克隆补全：外层+内层 ID 同步；不再清空 .ch_description（避免影响真实卡片）
 async function ensureAllCardsInDom() {
     const block = document.getElementById('user_avatar_block');
     if (!block) return;
 
     const allAvatars = getAllAvatars();
 
-    // 用"卡片真实 ID（getCardAvatarId）"判断是否已在 DOM
     const presentInDom = new Set();
     block.querySelectorAll(':scope > .avatar-container').forEach(c => {
         const id = getCardAvatarId(c);
@@ -434,7 +456,6 @@ async function ensureAllCardsInDom() {
         try { await _getUserAvatars(false); } catch(e) {}
     }
 
-    // 重新检查（因为 _getUserAvatars 可能补 DOM）
     const presentAfter = new Set();
     block.querySelectorAll(':scope > .avatar-container').forEach(c => {
         const id = getCardAvatarId(c);
@@ -450,7 +471,7 @@ async function ensureAllCardsInDom() {
         const clone = template.cloneNode(true);
         clone.classList.remove('selected');
 
-        // ⭐⭐⭐ 关键修复：外层 + 所有内层 data-avatar-id 全部更新成新 avatar
+        // 外层 + 所有内层 data-avatar-id 同步
         clone.dataset.avatarId = avatar;
         clone.setAttribute('title', avatar);
         clone.querySelectorAll('[data-avatar-id]').forEach(el => {
@@ -470,15 +491,15 @@ async function ensureAllCardsInDom() {
             el.textContent = getName(avatar);
         });
 
-        // 清掉残留的钩子标记（让 applySelectModeUI 能重新挂事件）
+        // 注意：不清空 .ch_description / .ch_additional_info
+        // 因为 ST 真实数据从 power_user.persona_descriptions 读，DOM 残留不影响功能
+        // 而清空会导致用户看不到描述
+
         delete clone.dataset.pgClickHooked;
 
-        // ⭐ 兜底：如果 ST 原生委托抓不到这个新克隆的卡片，手动用 setUserAvatar 切换
-        // （正常情况下外层 ID 修对后，原生 jQuery 委托能正常工作；这里只是双保险）
+        // 兜底点击切换（若 ST 原生委托没接住）
         clone.addEventListener('click', async (e) => {
             if (state.selectMode) return;
-            // 如果原生委托已经处理了，不会到这里；如果没处理（比如直接绑定方式），由我们兜底
-            // 我们用一个微小延迟检测：如果 power_user.user_avatar 没变，说明原生没接住，我们手动切
             const before = power_user.user_avatar;
             setTimeout(async () => {
                 if (power_user.user_avatar === before) {
@@ -579,7 +600,7 @@ function bindWrappers(block) {
     });
 }
 
-// ========== 位置2：快捷弹窗（移动端友好） ==========
+// ========== 位置2：快捷弹窗 ==========
 let _popperInstance = null;
 
 function initQuick() {
@@ -588,16 +609,14 @@ function initQuick() {
         if (!leftForm) { setTimeout(tryInject, 500); return; }
         if (document.getElementById(BTN_ID)) return;
 
-        // ⭐ 用 jQuery 创建 + 绑定（移动端兼容性更好）
-        const $btn = window.jQuery(`
-            <div id="${BTN_ID}" class="interactable" tabindex="0" title="人设分组（快捷切换）" role="button">
-                <img class="pg-quick-btn-img" alt="">
-                <i class="fa-solid fa-user-circle pg-fallback-icon" style="display:none;"></i>
-            </div>
-        `);
+        const $btn = window.jQuery(
+            '<div id="' + BTN_ID + '" class="interactable" tabindex="0" title="人设分组（快捷切换）" role="button">' +
+            '<img class="pg-quick-btn-img" alt="">' +
+            '<i class="fa-solid fa-user-circle pg-fallback-icon" style="display:none;"></i>' +
+            '</div>'
+        );
         window.jQuery(leftForm).append($btn);
 
-        // ⭐ 用 jQuery 的 click 绑定（移动端触屏会被 jQuery 正确处理为 click）
         $btn.on('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -610,7 +629,7 @@ function initQuick() {
     };
     tryInject();
 
-    // ⭐ 全局 click 委托关闭弹窗（替代 mousedown，移动端友好）
+    // 全局 click 委托关闭弹窗
     window.jQuery(document.body).on('click.pgQuick', (e) => {
         const p = document.getElementById(POPUP_ID);
         if (!p || p.style.display === 'none') return;
@@ -684,7 +703,6 @@ function closeQuick() {
     }
 }
 
-// ⭐ 优先用 Popper 定位，fallback 手写
 async function positionQuick(p) {
     const b = document.getElementById(BTN_ID);
     if (!b) return;
@@ -697,7 +715,6 @@ async function positionQuick(p) {
                 try { _popperInstance.destroy(); } catch(e) {}
                 _popperInstance = null;
             }
-            // 清掉 fallback 时手动设的 left/top/bottom
             p.style.position = '';
             p.style.left = '';
             p.style.top = '';
@@ -717,7 +734,7 @@ async function positionQuick(p) {
         }
     }
 
-    // Fallback: 手写定位
+    // Fallback 手写定位
     const r = b.getBoundingClientRect();
     p.style.position = 'fixed';
     const pw = p.offsetWidth || 320;
@@ -769,7 +786,6 @@ function renderQuick() {
     }
     p.innerHTML = h;
 
-    // ⭐ 用 jQuery 绑定，移动端兼容
     window.jQuery(p).find('.pg-quick-avatar').on('click', async function (e) {
         e.preventDefault();
         e.stopPropagation();
@@ -799,7 +815,7 @@ jQuery(async () => {
     console.log('[' + EXT_NAME + '] Loading...');
     initStorage();
     await loadPersonaApi();
-    loadPopper();  // 后台预加载，不阻塞
+    loadPopper();
 
     try { initMainPanel(); console.log('[' + EXT_NAME + '] Main panel initialized.'); }
     catch (err) { console.error('[' + EXT_NAME + '] Main panel init failed:', err); }
