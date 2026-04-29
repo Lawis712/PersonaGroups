@@ -41,26 +41,52 @@ function movePersonas(avatars, targetId) {
 }
 
 // ========== 工具 ==========
-// ⭐ 过滤掉损坏的 persona 数据
+// ⭐ 核心：用原生 getUserAvatars 取真实列表（自动过滤孤儿/损坏数据）
+let _validAvatars = null;       // 缓存的有效 avatar 列表（来自 /api/avatars/get）
+let _validAvatarsSet = null;
+
+async function refreshValidAvatars() {
+    await loadPersonaApi();
+    if (_getUserAvatars) {
+        try {
+            const list = await _getUserAvatars(false);
+            if (Array.isArray(list)) {
+                _validAvatars = list;
+                _validAvatarsSet = new Set(list);
+                return;
+            }
+        } catch (e) {
+            console.warn('[' + EXT_NAME + '] getUserAvatars failed:', e);
+        }
+    }
+    // fallback：用 power_user.personas keys + 简单过滤
+    const personas = power_user.personas || {};
+    _validAvatars = Object.keys(personas).filter(key => {
+        if (!/[.\-_]/.test(key) && !/^\d/.test(key)) return false;
+        const name = personas[key];
+        if (typeof name === 'string' && (name.length > 200 || name.includes('\n'))) return false;
+        return true;
+    });
+    _validAvatarsSet = new Set(_validAvatars);
+}
+
 function getAllAvatars() {
+    if (_validAvatars) return _validAvatars;
+    // 还没加载完时的兜底（同步降级）
     const personas = power_user.personas || {};
     return Object.keys(personas).filter(key => {
-        // 排除明显损坏的 key（看起来不像文件名）
-        // 合法 avatar key 一般包含 . - _ 或以数字开头（如 "1762722997832-.png"）
-        if (!/[.\-_]/.test(key) && !/^\d/.test(key)) {
-            console.warn('[' + EXT_NAME + '] Skipping malformed persona key:', key);
-            return false;
-        }
-        // 排除 name 字段被污染（被塞了描述文本）的记录
+        if (!/[.\-_]/.test(key) && !/^\d/.test(key)) return false;
         const name = personas[key];
-        if (typeof name === 'string' && (name.length > 200 || name.includes('\n'))) {
-            console.warn('[' + EXT_NAME + '] Skipping persona with corrupted name:', key);
-            return false;
-        }
+        if (typeof name === 'string' && (name.length > 200 || name.includes('\n'))) return false;
         return true;
     });
 }
-// ⭐ 名字防污染
+
+function isValidAvatar(a) {
+    if (_validAvatarsSet) return _validAvatarsSet.has(a);
+    return true; // 还没加载就先放行
+}
+
 function getName(a) {
     const raw = (power_user.personas || {})[a];
     if (typeof raw !== 'string') return a;
@@ -84,7 +110,6 @@ function isBound(a) {
     if (Array.isArray(power_user.persona_locked_chats) && power_user.persona_locked_chats.includes(a)) return true;
     return false;
 }
-// 取卡片真实 ID：优先内层 .avatar 上的 data-avatar-id（最新），再退到外层
 function getCardAvatarId(card) {
     const inner = card.querySelector('.avatar[data-avatar-id]') || card.querySelector('[data-avatar-id]');
     if (inner && inner.dataset.avatarId) return inner.dataset.avatarId;
@@ -125,7 +150,6 @@ async function switchPersona(avatar) {
         try { await _setUserAvatar(avatar); return; }
         catch (e) { console.warn('[' + EXT_NAME + '] setUserAvatar failed:', e); }
     }
-    // fallback：触发原生卡片点击
     const candidates = document.querySelectorAll('#user_avatar_block .avatar-container');
     for (const c of candidates) {
         if (getCardAvatarId(c) === avatar) {
@@ -282,6 +306,15 @@ async function reorganizeNative() {
     const block = document.getElementById('user_avatar_block');
     if (!block) return;
 
+    // ⭐ 保存滚动位置（修复"切换人设跳到顶部"）
+    const scrollContainer = document.getElementById('PersonaManagement');
+    const savedScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
+
+    // ⭐ 拉取最新有效列表（异步，但不阻塞首次渲染）
+    if (!_validAvatars) {
+        await refreshValidAvatars();
+    }
+
     if (state.search.trim()) {
         isReorganizing = true;
         try {
@@ -304,7 +337,13 @@ async function reorganizeNative() {
             const pager = document.getElementById(PAGER_ID);
             if (pager) pager.style.display = 'none';
         } finally {
-            requestAnimationFrame(() => { isReorganizing = false; });
+            requestAnimationFrame(() => {
+                isReorganizing = false;
+                // ⭐ 还原滚动位置
+                if (scrollContainer && savedScrollTop > 0) {
+                    scrollContainer.scrollTop = savedScrollTop;
+                }
+            });
         }
         return;
     }
@@ -333,8 +372,10 @@ async function reorganizeNative() {
         const cardMap = new Map();
         for (const c of allCards) {
             const id = getCardAvatarId(c);
-            if (id && !cardMap.has(id)) cardMap.set(id, c);
+            // ⭐ 只把有效 avatar 放进 cardMap（孤儿卡片直接隐藏）
+            if (id && isValidAvatar(id) && !cardMap.has(id)) cardMap.set(id, c);
         }
+        // 全部隐藏（包括孤儿卡片，它们不会被加进任何分组/未分组区，等于隐藏）
         allCards.forEach(c => c.style.display = 'none');
 
         const passFilter = (avatar) => {
@@ -352,6 +393,7 @@ async function reorganizeNative() {
         const contentAvatars = [];
         for (const g of groups) {
             if (g.collapsed) continue;
+            // 分组里也只显示有效 avatar
             const visible = g.personas.filter(a => cardMap.has(a) && passFilter(a));
             for (const a of visible) contentAvatars.push({ avatar: a, groupId: g.id });
         }
@@ -371,7 +413,7 @@ async function reorganizeNative() {
         const fragmentsToPrepend = [];
         for (const g of groups) {
             const totalInGroup = g.personas.filter(a => cardMap.has(a) && passFilter(a)).length;
-            const totalPersonasInGroup = g.personas.length;
+            const totalPersonasInGroup = g.personas.filter(a => cardMap.has(a)).length;
             if (totalPersonasInGroup > 0 && totalInGroup === 0) continue;
 
             const wrapper = document.createElement('div');
@@ -431,11 +473,16 @@ async function reorganizeNative() {
         bindWrappers(block);
         renderPager(totalPages);
     } finally {
-        requestAnimationFrame(() => { isReorganizing = false; });
+        requestAnimationFrame(() => {
+            isReorganizing = false;
+            // ⭐ 还原滚动位置
+            if (scrollContainer && savedScrollTop > 0) {
+                scrollContainer.scrollTop = savedScrollTop;
+            }
+        });
     }
 }
 
-// ⭐ 克隆补全：外层+内层 ID 同步；不再清空 .ch_description（避免影响真实卡片）
 async function ensureAllCardsInDom() {
     const block = document.getElementById('user_avatar_block');
     if (!block) return;
@@ -471,7 +518,6 @@ async function ensureAllCardsInDom() {
         const clone = template.cloneNode(true);
         clone.classList.remove('selected');
 
-        // 外层 + 所有内层 data-avatar-id 同步
         clone.dataset.avatarId = avatar;
         clone.setAttribute('title', avatar);
         clone.querySelectorAll('[data-avatar-id]').forEach(el => {
@@ -479,25 +525,18 @@ async function ensureAllCardsInDom() {
             el.setAttribute('title', avatar);
         });
 
-        // 更新所有图片
         clone.querySelectorAll('img').forEach(img => {
             img.src = getAvatarUrl(avatar);
             img.alt = getName(avatar);
             img.removeAttribute('srcset');
         });
 
-        // 更新名字
         clone.querySelectorAll('.ch_name, .character_name').forEach(el => {
             el.textContent = getName(avatar);
         });
 
-        // 注意：不清空 .ch_description / .ch_additional_info
-        // 因为 ST 真实数据从 power_user.persona_descriptions 读，DOM 残留不影响功能
-        // 而清空会导致用户看不到描述
-
         delete clone.dataset.pgClickHooked;
 
-        // 兜底点击切换（若 ST 原生委托没接住）
         clone.addEventListener('click', async (e) => {
             if (state.selectMode) return;
             const before = power_user.user_avatar;
@@ -629,7 +668,6 @@ function initQuick() {
     };
     tryInject();
 
-    // 全局 click 委托关闭弹窗
     window.jQuery(document.body).on('click.pgQuick', (e) => {
         const p = document.getElementById(POPUP_ID);
         if (!p || p.style.display === 'none') return;
@@ -734,7 +772,6 @@ async function positionQuick(p) {
         }
     }
 
-    // Fallback 手写定位
     const r = b.getBoundingClientRect();
     p.style.position = 'fixed';
     const pw = p.offsetWidth || 320;
@@ -816,6 +853,7 @@ jQuery(async () => {
     initStorage();
     await loadPersonaApi();
     loadPopper();
+    await refreshValidAvatars();   // ⭐ 启动时拉一次有效列表
 
     try { initMainPanel(); console.log('[' + EXT_NAME + '] Main panel initialized.'); }
     catch (err) { console.error('[' + EXT_NAME + '] Main panel init failed:', err); }
@@ -828,7 +866,8 @@ jQuery(async () => {
         catch (err) { console.error('[' + EXT_NAME + '] Quick panel init failed:', err); }
     }
 
-    const refreshAll = () => {
+    const refreshAll = async () => {
+        await refreshValidAvatars();   // ⭐ 设置变化时刷新有效列表
         try { refreshMain(); } catch(e){}
         try { refreshQuick(); } catch(e){}
     };
