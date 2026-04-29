@@ -470,10 +470,6 @@ async function ensureAllCardsInDom() {
             el.textContent = getName(avatar);
         });
 
-        // ⭐ 清空模板残留的描述、附加信息
-        clone.querySelectorAll('.ch_description').forEach(el => el.textContent = '');
-        clone.querySelectorAll('.ch_additional_info').forEach(el => el.textContent = '');
-
         // 清掉残留的钩子标记（让 applySelectModeUI 能重新挂事件）
         delete clone.dataset.pgClickHooked;
 
