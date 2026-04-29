@@ -1,15 +1,39 @@
-#pg-quick-btn {
-    position: relative;
-    width: var(--bottomFormBlockSize);
-    height: var(--bottomFormBlockSize);
-    order: 10;          /* ⭐ 100 → 10，跟 ST 原生 Quick Persona 一致 */
-    cursor: pointer;
-    flex-shrink: 0;
-    align-self: center;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
+/* ====== 工具栏（位置1顶部）====== */
+.pg-toolbar-container {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+    margin-bottom: 8px;
+    background: var(--SmartThemeBlurTintColor);
 }
+
+.pg-toolbar {
+    display: flex;
+    gap: 6px;
+    align-items: stretch;
+    flex-wrap: nowrap;
+    width: 100%;
+}
+.pg-toolbar .pg-filter {
+    flex: 1 1 auto;
+    min-width: 0;
+    background: var(--black30a);
+    color: var(--SmartThemeBodyColor);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 4px;
+    padding: 4px 6px;
+}
+.pg-toolbar .menu_button {
+    flex: 0 0 auto;
+    margin: 0;
+    min-width: 38px;
+    padding: 4px 8px;
+}
+.pg-btn-selectmode.pg-active {
+    background: var(--SmartThemeQuoteColor) !important;
 }
 
 /* ====== 多选操作栏 ====== */
@@ -249,7 +273,7 @@
     position: relative;
     width: var(--bottomFormBlockSize);
     height: var(--bottomFormBlockSize);
-    order: 100;
+    order: 10;
     cursor: pointer;
     flex-shrink: 0;
     align-self: center;
@@ -339,7 +363,7 @@ body.square-avatars #pg-quick-btn .pg-quick-btn-img {
     cursor: pointer;
     border-radius: 50%;
     overflow: hidden;
-    width: 100%;            /* 跟随网格列宽 */
+    width: 100%;
     aspect-ratio: 1;
     transition: transform 0.15s, box-shadow 0.15s;
     border: 2px solid transparent;
