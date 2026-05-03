@@ -20,3 +20,20 @@
 ## 安装
 
 通过 ST 的"安装扩展"功能输入仓库地址
+
+## 设置
+
+在扩展面板找到"**用户人设分组**"，可以开关位置二的快捷弹窗。
+
+## License
+
+This project is licensed under **GNU AGPL-3.0** - see the [LICENSE](LICENSE) file for details.
+
+## Credits
+
+This project is based on / inspired by the **Quick Persona** extension from SillyTavern,  
+which is part of the [SillyTavern](https://github.com/SillyTavern/SillyTavern) project,  
+also licensed under AGPL-3.0.
+
+The quick switcher popup design (Position 2) follows the pattern from Quick Persona,  
+with extensions for group management.
