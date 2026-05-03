@@ -118,6 +118,12 @@ function getCardAvatarId(card) {
 }
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
+// ⭐ 判断当前筛选是不是某个分组 ID
+function getFilterGroupId() {
+    if (!state.filter || !state.filter.startsWith('group:')) return null;
+    return state.filter.slice('group:'.length);
+}
+
 // ========== ST API ==========
 let _setUserAvatar = null;
 let _getUserAvatars = null;
@@ -221,11 +227,30 @@ function renderToolbar() {
     const t = document.getElementById(TOOLBAR_ID);
     if (!t) return;
     const hidden = isGroupsHidden();
+
+    // ⭐ 如果当前 filter 指向已删除的分组，自动回退到 all
+    const currentGroupId = getFilterGroupId();
+    if (currentGroupId && !getGroups().find(g => g.id === currentGroupId)) {
+        state.filter = 'all';
+    }
+
     let html = '<div class="pg-toolbar">';
     html += '<select class="pg-filter">';
     html += '<option value="all"' + (state.filter==='all'?' selected':'') + '>全部</option>';
     html += '<option value="bound"' + (state.filter==='bound'?' selected':'') + '>已绑定</option>';
     html += '<option value="unbound"' + (state.filter==='unbound'?' selected':'') + '>未绑定</option>';
+
+    // ⭐ optgroup 列出所有分组
+    const groups = getGroups();
+    if (groups.length > 0) {
+        html += '<optgroup label="────୨ৎ──── 按分组 ────୨ৎ────">';
+        for (const g of groups) {
+            const v = 'group:' + g.id;
+            html += '<option value="' + esc(v) + '"' + (state.filter===v?' selected':'') + '>' + esc(g.name) + '</option>';
+        }
+        html += '</optgroup>';
+    }
+
     html += '</select>';
     html += '<button class="menu_button pg-btn-newgroup" title="新建分组"><i class="fa-solid fa-folder-plus"></i></button>';
     html += '<button class="menu_button pg-btn-selectmode' + (state.selectMode?' pg-active':'') + '" title="多选模式"><i class="fa-solid fa-check-double"></i></button>';
@@ -366,7 +391,6 @@ async function reorganizeNative() {
 
     isReorganizing = true;
     try {
-        // 还原已有分组容器
         block.querySelectorAll(':scope > .pg-group-wrapper').forEach(w => {
             const body = w.querySelector('.pg-group-body');
             if (body) {
@@ -390,7 +414,15 @@ async function reorganizeNative() {
         }
         allCards.forEach(c => c.style.display = 'none');
 
+        const filterGroupId = getFilterGroupId();
+
+        // ⭐ 状态判断
+        const isFilteringByGroup = !!filterGroupId;
+        const hidden = isGroupsHidden();
+
         const passFilter = (avatar) => {
+            // 分组筛选时，passFilter 不再判断 bound/unbound（因为下拉是单选，filter 已经是分组ID了）
+            if (isFilteringByGroup) return true;
             if (state.filter === 'bound' && !isBound(avatar)) return false;
             if (state.filter === 'unbound' && isBound(avatar)) return false;
             return true;
@@ -402,95 +434,92 @@ async function reorganizeNative() {
         const allAvatars = getAllAvatars().filter(a => cardMap.has(a));
         const ungroupedAvatars = allAvatars.filter(a => !groupedSet.has(a));
 
-        const hidden = isGroupsHidden();
+        // ========== 三种渲染模式 ==========
+        // 模式 A: 按分组筛选 → 只显示该分组内卡片，不画分组容器，分页对该卡片生效
+        // 模式 B: 隐藏分组 → 只显示未分组卡片，不画分组容器，分页对未分组生效
+        // 模式 C: 默认 → 画所有分组容器（不分页），分页对未分组生效
 
-        // ========== 分页逻辑 ==========
-        // 方案 B：分组永远完整显示，分页只控制未分组区
-        // 隐藏分组：只渲染未分组卡片，分组+其内卡片一律不显示
-        const ungroupedFiltered = ungroupedAvatars.filter(passFilter);
-        const pageSize = getPageSize();
-        const totalPages = Math.max(1, Math.ceil(ungroupedFiltered.length / pageSize));
-        if (state.page >= totalPages) state.page = totalPages - 1;
-        if (state.page < 0) state.page = 0;
-        const start = state.page * pageSize;
-        const end = start + pageSize;
-        const ungroupedPageItems = ungroupedFiltered.slice(start, end);
-        const ungroupedPageSet = new Set(ungroupedPageItems);
+        let pageItemsForDisplay = [];   // 当前页要显示的 avatar 列表（按 block 顺序 append）
+        let totalPages = 1;
 
-        // 1) 构建分组容器（仅在未隐藏时）
-        const fragmentsToPrepend = [];
-        if (!hidden) {
-            for (const g of groups) {
-                const visibleInGroup = g.personas.filter(a => cardMap.has(a) && passFilter(a));
-                const totalPersonasInGroup = g.personas.filter(a => cardMap.has(a)).length;
-                // 筛选下空的分组：跳过（保持原来的行为）
-                if (totalPersonasInGroup > 0 && visibleInGroup.length === 0) continue;
+        if (isFilteringByGroup) {
+            // 模式 A
+            const targetGroup = groups.find(g => g.id === filterGroupId);
+            const groupAvatars = targetGroup
+                ? targetGroup.personas.filter(a => cardMap.has(a))
+                : [];
+            const pageSize = getPageSize();
+            totalPages = Math.max(1, Math.ceil(groupAvatars.length / pageSize));
+            if (state.page >= totalPages) state.page = totalPages - 1;
+            if (state.page < 0) state.page = 0;
+            const start = state.page * pageSize;
+            pageItemsForDisplay = groupAvatars.slice(start, start + pageSize);
+        } else {
+            // 模式 B / C：分页只对未分组（已筛选）生效
+            const ungroupedFiltered = ungroupedAvatars.filter(passFilter);
+            const pageSize = getPageSize();
+            totalPages = Math.max(1, Math.ceil(ungroupedFiltered.length / pageSize));
+            if (state.page >= totalPages) state.page = totalPages - 1;
+            if (state.page < 0) state.page = 0;
+            const start = state.page * pageSize;
+            pageItemsForDisplay = ungroupedFiltered.slice(start, start + pageSize);
 
-                const wrapper = document.createElement('div');
-                wrapper.className = 'pg-group-wrapper' + (g.collapsed ? ' pg-collapsed' : '');
-                if (totalPersonasInGroup === 0) wrapper.classList.add('pg-empty');
-                wrapper.dataset.gid = g.id;
+            // 模式 C：构建分组容器（不分页，全量显示）
+            if (!hidden) {
+                const fragmentsToPrepend = [];
+                for (const g of groups) {
+                    const visibleInGroup = g.personas.filter(a => cardMap.has(a) && passFilter(a));
+                    const totalPersonasInGroup = g.personas.filter(a => cardMap.has(a)).length;
+                    if (totalPersonasInGroup > 0 && visibleInGroup.length === 0) continue;
 
-                const header = document.createElement('div');
-                header.className = 'pg-group-header';
-                const countText = totalPersonasInGroup === 0 ? '空' : visibleInGroup.length;
-                header.innerHTML =
-                    '<i class="fa-solid fa-chevron-down pg-toggle"></i>' +
-                    '<span class="pg-group-name">' + esc(g.name) + '</span>' +
-                    '<span class="pg-group-count">' + countText + '</span>' +
-                    '<div class="pg-group-actions">' +
-                    '<i class="fa-solid fa-pen pg-btn-rename" title="重命名"></i>' +
-                    '<i class="fa-solid fa-trash pg-btn-delgroup" title="删除分组"></i>' +
-                    '</div>';
-                wrapper.appendChild(header);
+                    const wrapper = document.createElement('div');
+                    wrapper.className = 'pg-group-wrapper' + (g.collapsed ? ' pg-collapsed' : '');
+                    if (totalPersonasInGroup === 0) wrapper.classList.add('pg-empty');
+                    wrapper.dataset.gid = g.id;
 
-                const body = document.createElement('div');
-                body.className = 'pg-group-body';
-                if (!g.collapsed && totalPersonasInGroup > 0) {
-                    // 方案 B：分组里的卡片全部显示，不分页
-                    for (const a of g.personas) {
-                        if (cardMap.has(a) && passFilter(a)) {
-                            const card = cardMap.get(a);
-                            if (card) {
-                                card.style.display = '';
-                                body.appendChild(card);
+                    const header = document.createElement('div');
+                    header.className = 'pg-group-header';
+                    const countText = totalPersonasInGroup === 0 ? '空' : visibleInGroup.length;
+                    header.innerHTML =
+                        '<i class="fa-solid fa-chevron-down pg-toggle"></i>' +
+                        '<span class="pg-group-name">' + esc(g.name) + '</span>' +
+                        '<span class="pg-group-count">' + countText + '</span>' +
+                        '<div class="pg-group-actions">' +
+                        '<i class="fa-solid fa-pen pg-btn-rename" title="重命名"></i>' +
+                        '<i class="fa-solid fa-trash pg-btn-delgroup" title="删除分组"></i>' +
+                        '</div>';
+                    wrapper.appendChild(header);
+
+                    const body = document.createElement('div');
+                    body.className = 'pg-group-body';
+                    if (!g.collapsed && totalPersonasInGroup > 0) {
+                        for (const a of g.personas) {
+                            if (cardMap.has(a) && passFilter(a)) {
+                                const card = cardMap.get(a);
+                                if (card) {
+                                    card.style.display = '';
+                                    body.appendChild(card);
+                                }
                             }
                         }
+                    } else if (!g.collapsed && totalPersonasInGroup === 0) {
+                        body.innerHTML = '<div class="pg-empty-hint">暂无人设，请用多选模式将人设移入此分组</div>';
                     }
-                } else if (!g.collapsed && totalPersonasInGroup === 0) {
-                    body.innerHTML = '<div class="pg-empty-hint">暂无人设，请用多选模式将人设移入此分组</div>';
+                    wrapper.appendChild(body);
+                    fragmentsToPrepend.push(wrapper);
                 }
-                wrapper.appendChild(body);
-                fragmentsToPrepend.push(wrapper);
-            }
-
-            for (let i = fragmentsToPrepend.length - 1; i >= 0; i--) {
-                block.insertBefore(fragmentsToPrepend[i], block.firstChild);
+                for (let i = fragmentsToPrepend.length - 1; i >= 0; i--) {
+                    block.insertBefore(fragmentsToPrepend[i], block.firstChild);
+                }
             }
         }
 
-        // 2) 显示当前页的"未分组"卡片（隐藏模式下：所有卡片都视作"未分组"，但仍按 ungrouped 顺序）
-        // 隐藏模式下，分组里的卡片已经被全部隐藏（不在 ungroupedPageSet 里），所以只需正常处理 ungrouped
-        if (hidden) {
-            // 隐藏模式：只显示未分组里当前页的卡片
-            for (const a of ungroupedAvatars) {
-                const card = cardMap.get(a);
-                if (!card) continue;
-                if (ungroupedPageSet.has(a)) {
-                    card.style.display = '';
-                    block.appendChild(card);
-                }
-            }
-        } else {
-            // 正常模式：未分组卡片按页显示，已分组卡片已经在分组容器里了
-            for (const a of ungroupedAvatars) {
-                const card = cardMap.get(a);
-                if (!card) continue;
-                if (ungroupedPageSet.has(a)) {
-                    card.style.display = '';
-                    block.appendChild(card);
-                }
-            }
+        // 显示当前页的卡片（按 pageItemsForDisplay 顺序 append 到 block 末尾）
+        for (const a of pageItemsForDisplay) {
+            const card = cardMap.get(a);
+            if (!card) continue;
+            card.style.display = '';
+            block.appendChild(card);
         }
 
         applySelectModeUI();
