@@ -243,7 +243,7 @@ function renderToolbar() {
     // ⭐ optgroup 列出所有分组
     const groups = getGroups();
     if (groups.length > 0) {
-        html += '<optgroup label="────୨ৎ──── 按分组 ────୨ৎ────">';
+        html += '<optgroup label="──୨ৎ─按分组─୨ৎ──">';
         for (const g of groups) {
             const v = 'group:' + g.id;
             html += '<option value="' + esc(v) + '"' + (state.filter===v?' selected':'') + '>' + esc(g.name) + '</option>';
