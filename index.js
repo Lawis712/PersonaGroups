@@ -1,23 +1,55 @@
+/**
+ * SillyTavern Persona Groups (用户人设分组)
+ * Copyright (C) 2026  <Lavi>
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published
+ * by the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * ---
+ * Based on / inspired by the Quick Persona extension from SillyTavern
+ * (part of the SillyTavern project, https://github.com/SillyTavern/SillyTavern)
+ * Licensed under AGPL-3.0
+ */
+
 import { extension_settings } from '../../../extensions.js';
 import { eventSource, event_types, saveSettingsDebounced } from '../../../../script.js';
 import { power_user } from '../../../power-user.js';
 
 const EXT_NAME = 'Persona Groups';
+const EXT_DISPLAY = '用户人设分组';
 const KEY = 'persona_groups';
 const TOOLBAR_ID = 'pg-toolbar-container';
 const PAGER_ID = 'pg-pager';
 const BTN_ID = 'pg-quick-btn';
 const POPUP_ID = 'pg-quick-popup';
+const SETTINGS_ID = 'pg-extension-settings';
 
 // ========== 存储 ==========
 function initStorage() {
     if (!extension_settings[KEY]) {
-        extension_settings[KEY] = { groups: [], pageSize: 20, version: 2, groupsHidden: false };
+        extension_settings[KEY] = {
+            groups: [],
+            pageSize: 20,
+            version: 2,
+            groupsHidden: false,
+            quickEnabled: true,        // ⭐ 默认启用位置二
+        };
         saveSettingsDebounced();
     }
     if (!extension_settings[KEY].groups) extension_settings[KEY].groups = [];
     if (!extension_settings[KEY].pageSize) extension_settings[KEY].pageSize = 20;
     if (typeof extension_settings[KEY].groupsHidden !== 'boolean') extension_settings[KEY].groupsHidden = false;
+    if (typeof extension_settings[KEY].quickEnabled !== 'boolean') extension_settings[KEY].quickEnabled = true;
     saveSettingsDebounced();
 }
 function getGroups() { return extension_settings[KEY].groups; }
@@ -25,6 +57,8 @@ function getPageSize() { return extension_settings[KEY].pageSize || 20; }
 function setPageSize(n) { extension_settings[KEY].pageSize = n; saveSettingsDebounced(); }
 function isGroupsHidden() { return !!extension_settings[KEY].groupsHidden; }
 function setGroupsHidden(v) { extension_settings[KEY].groupsHidden = !!v; saveSettingsDebounced(); }
+function isQuickEnabled() { return !!extension_settings[KEY].quickEnabled; }
+function setQuickEnabled(v) { extension_settings[KEY].quickEnabled = !!v; saveSettingsDebounced(); }
 function saveGroups() { saveSettingsDebounced(); }
 function createGroup(name) {
     const id = 'g_' + Date.now() + '_' + Math.random().toString(36).slice(2,7);
@@ -118,10 +152,15 @@ function getCardAvatarId(card) {
 }
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
-// ⭐ 判断当前筛选是不是某个分组 ID
 function getFilterGroupId() {
     if (!state.filter || !state.filter.startsWith('group:')) return null;
     return state.filter.slice('group:'.length);
+}
+
+// 检查 ST 自带 Quick Persona 是否启用
+function isStQuickPersonaEnabled() {
+    const qp = extension_settings.quickPersona;
+    return !!(qp && qp.enabled === true);
 }
 
 // ========== ST API ==========
@@ -168,6 +207,88 @@ async function switchPersona(avatar) {
 
 const state = { selectMode: false, selected: new Set(), filter: 'all', page: 0, search: '' };
 let isReorganizing = false;
+
+// ========== 扩展设置面板 ==========
+function initExtensionSettings() {
+    const container = document.getElementById('extensions_settings2') || document.getElementById('extensions_settings');
+    if (!container) {
+        setTimeout(initExtensionSettings, 500);
+        return;
+    }
+    if (document.getElementById(SETTINGS_ID)) return;
+
+    const $panel = window.jQuery(`
+        <div id="${SETTINGS_ID}" class="pg-extension-settings">
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b>${EXT_DISPLAY}</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <div class="pg-setting-row">
+                        <label class="checkbox_label" for="pg-setting-quick-enabled">
+                            <input type="checkbox" id="pg-setting-quick-enabled">
+                            <span>启用快捷弹窗（输入栏旁边的小头像）</span>
+                        </label>
+                        <small class="pg-setting-hint" id="pg-setting-quick-hint" style="display:none; opacity:0.7; margin-top:4px; font-style:italic;"></small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `);
+    window.jQuery(container).append($panel);
+
+    const $cb = $panel.find('#pg-setting-quick-enabled');
+    const $hint = $panel.find('#pg-setting-quick-hint');
+
+    function updateUI() {
+        const enabled = isQuickEnabled();
+        const stQpOn = isStQuickPersonaEnabled();
+        $cb.prop('checked', enabled);
+        if (stQpOn) {
+            $cb.prop('disabled', true);
+            $hint.text('⚠️ 检测到酒馆自带的 Quick Persona 扩展已启用，本插件的快捷弹窗已自动禁用以避免冲突。如需启用本插件的快捷弹窗，请先在扩展面板中关闭 Quick Persona。').show();
+        } else {
+            $cb.prop('disabled', false);
+            $hint.hide();
+        }
+    }
+
+    $cb.on('change', function () {
+        const v = $(this).prop('checked');
+        setQuickEnabled(v);
+        if (v && !isStQuickPersonaEnabled()) {
+            initQuick();
+        } else {
+            removeQuickBtn();
+        }
+    });
+
+    updateUI();
+
+    // 监听设置变化时刷新 UI 状态（比如用户在扩展面板里打开/关闭了 Quick Persona）
+    if (eventSource && event_types && event_types.SETTINGS_UPDATED) {
+        eventSource.on(event_types.SETTINGS_UPDATED, () => {
+            updateUI();
+            // 如果 Quick Persona 状态变化，自动调整本插件
+            const shouldShow = isQuickEnabled() && !isStQuickPersonaEnabled();
+            const exists = !!document.getElementById(BTN_ID);
+            if (shouldShow && !exists) initQuick();
+            if (!shouldShow && exists) removeQuickBtn();
+        });
+    }
+}
+
+function removeQuickBtn() {
+    const btn = document.getElementById(BTN_ID);
+    if (btn) btn.remove();
+    const popup = document.getElementById(POPUP_ID);
+    if (popup) popup.remove();
+    if (_popperInstance) {
+        try { _popperInstance.destroy(); } catch(e) {}
+        _popperInstance = null;
+    }
+}
 
 // ========== 位置1：工具栏 + 重组原生 DOM ==========
 function initMainPanel() {
@@ -228,7 +349,6 @@ function renderToolbar() {
     if (!t) return;
     const hidden = isGroupsHidden();
 
-    // ⭐ 如果当前 filter 指向已删除的分组，自动回退到 all
     const currentGroupId = getFilterGroupId();
     if (currentGroupId && !getGroups().find(g => g.id === currentGroupId)) {
         state.filter = 'all';
@@ -240,10 +360,9 @@ function renderToolbar() {
     html += '<option value="bound"' + (state.filter==='bound'?' selected':'') + '>已绑定</option>';
     html += '<option value="unbound"' + (state.filter==='unbound'?' selected':'') + '>未绑定</option>';
 
-    // ⭐ optgroup 列出所有分组
     const groups = getGroups();
     if (groups.length > 0) {
-        html += '<optgroup label="──୨ৎ─按分组─୨ৎ──">';
+        html += '<optgroup label="───୨ৎ─按分组─୨ৎ───">';
         for (const g of groups) {
             const v = 'group:' + g.id;
             html += '<option value="' + esc(v) + '"' + (state.filter===v?' selected':'') + '>' + esc(g.name) + '</option>';
@@ -415,13 +534,10 @@ async function reorganizeNative() {
         allCards.forEach(c => c.style.display = 'none');
 
         const filterGroupId = getFilterGroupId();
-
-        // ⭐ 状态判断
         const isFilteringByGroup = !!filterGroupId;
         const hidden = isGroupsHidden();
 
         const passFilter = (avatar) => {
-            // 分组筛选时，passFilter 不再判断 bound/unbound（因为下拉是单选，filter 已经是分组ID了）
             if (isFilteringByGroup) return true;
             if (state.filter === 'bound' && !isBound(avatar)) return false;
             if (state.filter === 'unbound' && isBound(avatar)) return false;
@@ -434,16 +550,10 @@ async function reorganizeNative() {
         const allAvatars = getAllAvatars().filter(a => cardMap.has(a));
         const ungroupedAvatars = allAvatars.filter(a => !groupedSet.has(a));
 
-        // ========== 三种渲染模式 ==========
-        // 模式 A: 按分组筛选 → 只显示该分组内卡片，不画分组容器，分页对该卡片生效
-        // 模式 B: 隐藏分组 → 只显示未分组卡片，不画分组容器，分页对未分组生效
-        // 模式 C: 默认 → 画所有分组容器（不分页），分页对未分组生效
-
-        let pageItemsForDisplay = [];   // 当前页要显示的 avatar 列表（按 block 顺序 append）
+        let pageItemsForDisplay = [];
         let totalPages = 1;
 
         if (isFilteringByGroup) {
-            // 模式 A
             const targetGroup = groups.find(g => g.id === filterGroupId);
             const groupAvatars = targetGroup
                 ? targetGroup.personas.filter(a => cardMap.has(a))
@@ -455,7 +565,6 @@ async function reorganizeNative() {
             const start = state.page * pageSize;
             pageItemsForDisplay = groupAvatars.slice(start, start + pageSize);
         } else {
-            // 模式 B / C：分页只对未分组（已筛选）生效
             const ungroupedFiltered = ungroupedAvatars.filter(passFilter);
             const pageSize = getPageSize();
             totalPages = Math.max(1, Math.ceil(ungroupedFiltered.length / pageSize));
@@ -464,7 +573,6 @@ async function reorganizeNative() {
             const start = state.page * pageSize;
             pageItemsForDisplay = ungroupedFiltered.slice(start, start + pageSize);
 
-            // 模式 C：构建分组容器（不分页，全量显示）
             if (!hidden) {
                 const fragmentsToPrepend = [];
                 for (const g of groups) {
@@ -514,7 +622,6 @@ async function reorganizeNative() {
             }
         }
 
-        // 显示当前页的卡片（按 pageItemsForDisplay 顺序 append 到 block 末尾）
         for (const a of pageItemsForDisplay) {
             const card = cardMap.get(a);
             if (!card) continue;
@@ -695,6 +802,9 @@ function bindWrappers(block) {
 let _popperInstance = null;
 
 function initQuick() {
+    if (!isQuickEnabled()) return;
+    if (isStQuickPersonaEnabled()) return;
+
     const tryInject = () => {
         const leftForm = document.getElementById('leftSendForm');
         if (!leftForm) { setTimeout(tryInject, 500); return; }
@@ -720,13 +830,17 @@ function initQuick() {
     };
     tryInject();
 
-    window.jQuery(document.body).on('click.pgQuick', (e) => {
-        const p = document.getElementById(POPUP_ID);
-        if (!p || p.style.display === 'none') return;
-        if (e.target.closest('#' + POPUP_ID)) return;
-        if (e.target.closest('#' + BTN_ID)) return;
-        closeQuick();
-    });
+    // 保证全局 click 委托只挂一次
+    if (!window.__pg_body_click_hooked) {
+        window.__pg_body_click_hooked = true;
+        window.jQuery(document.body).on('click.pgQuick', (e) => {
+            const p = document.getElementById(POPUP_ID);
+            if (!p || p.style.display === 'none') return;
+            if (e.target.closest('#' + POPUP_ID)) return;
+            if (e.target.closest('#' + BTN_ID)) return;
+            closeQuick();
+        });
+    }
 }
 
 function updateQuickBtnAvatar() {
@@ -907,15 +1021,19 @@ jQuery(async () => {
     loadPopper();
     await refreshValidAvatars();
 
+    try { initExtensionSettings(); console.log('[' + EXT_NAME + '] Settings panel initialized.'); }
+    catch (err) { console.error('[' + EXT_NAME + '] Settings panel init failed:', err); }
+
     try { initMainPanel(); console.log('[' + EXT_NAME + '] Main panel initialized.'); }
     catch (err) { console.error('[' + EXT_NAME + '] Main panel init failed:', err); }
 
-    const qp = extension_settings.quickPersona;
-    if (qp && qp.enabled === true) {
-        if (typeof toastr !== 'undefined') toastr.warning('Quick Persona enabled, quick popup disabled.', EXT_NAME);
-    } else {
+    if (isQuickEnabled() && !isStQuickPersonaEnabled()) {
         try { initQuick(); console.log('[' + EXT_NAME + '] Quick panel initialized.'); }
         catch (err) { console.error('[' + EXT_NAME + '] Quick panel init failed:', err); }
+    } else if (isStQuickPersonaEnabled()) {
+        console.log('[' + EXT_NAME + '] Quick popup skipped (ST Quick Persona is enabled).');
+    } else {
+        console.log('[' + EXT_NAME + '] Quick popup disabled by user settings.');
     }
 
     const refreshAll = async () => {
