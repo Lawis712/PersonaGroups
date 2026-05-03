@@ -144,7 +144,7 @@
     margin-left: 6px;
 }
 
-/* 窄屏隐藏首页/末页按钮 */
+/* ⭐ 窄屏只缩紧分页栏内边距，不再隐藏首页/末页按钮 */
 @media (max-width: 480px) {
     .pg-pager-inner {
         gap: 4px;
@@ -152,18 +152,16 @@
     }
     .pg-pager .menu_button {
         min-width: 32px;
-        padding: 3px 8px;
+        padding: 3px 6px;
     }
     .pg-pager-info {
-        min-width: 44px;
+        min-width: 40px;
         padding: 0 2px;
+        font-size: 0.85em;
     }
     .pg-pager-size {
-        max-width: 60px;
+        max-width: 56px;
         margin-left: 3px;
-    }
-    .pg-pager-edge {
-        display: none !important;
     }
 }
 
@@ -313,7 +311,7 @@ body.square-avatars #pg-quick-btn .pg-quick-btn-img {
     color: var(--SmartThemeQuoteColor);
 }
 
-/* ====== 快捷弹窗 ====== */
+/* ====== 快捷弹窗（PC 默认尺寸）====== */
 .pg-quick-popup {
     position: fixed;
     width: 320px;
@@ -357,7 +355,7 @@ body.square-avatars #pg-quick-btn .pg-quick-btn-img {
     font-size: 0.85em;
 }
 
-/* 弹窗里的头像网格 */
+/* 弹窗里的头像网格：5列 */
 .pg-quick-grid {
     display: grid;
     grid-template-columns: repeat(5, 1fr);
@@ -387,14 +385,15 @@ body.square-avatars .pg-quick-avatar { border-radius: 2px; }
 }
 .pg-quick-avatar.pg-current { border-color: var(--SmartThemeQuoteColor); }
 
-/* ⭐ 移动端弹窗略微缩小（只影响小屏，PC端不动） */
+/* ⭐ 移动端弹窗：高度占屏幕 1/3，宽度更窄，仍保持 5 列 */
 @media (max-width: 768px) {
     .pg-quick-popup {
-        width: 300px;
-        max-height: 55vh;
+        width: 280px;
+        max-height: 33vh;
         padding: 8px;
     }
     .pg-quick-grid {
+        grid-template-columns: repeat(5, 1fr);
         gap: 5px;
         padding: 3px;
     }
@@ -405,9 +404,9 @@ body.square-avatars .pg-quick-avatar { border-radius: 2px; }
     }
 }
 
-/* 极窄屏弹窗网格 5→4 列 */
+/* 极窄屏依然保持 5 列（用户要求） */
 @media (max-width: 380px) {
     .pg-quick-grid {
-        grid-template-columns: repeat(4, 1fr);
+        grid-template-columns: repeat(5, 1fr);
     }
 }
