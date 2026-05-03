@@ -16,8 +16,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *
  * ---
- * Based on / inspired by the Quick Persona extension from SillyTavern
- * (part of the SillyTavern project, https://github.com/SillyTavern/SillyTavern)
+ * Based on / inspired by the Quick Persona extension
+ * (https://github.com/SillyTavern/Extension-QuickPersona.git)
  * Licensed under AGPL-3.0
  */
 
