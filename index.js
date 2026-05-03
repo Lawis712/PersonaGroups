@@ -12,16 +12,19 @@ const POPUP_ID = 'pg-quick-popup';
 // ========== 存储 ==========
 function initStorage() {
     if (!extension_settings[KEY]) {
-        extension_settings[KEY] = { groups: [], pageSize: 20, version: 2 };
+        extension_settings[KEY] = { groups: [], pageSize: 20, version: 2, groupsHidden: false };
         saveSettingsDebounced();
     }
     if (!extension_settings[KEY].groups) extension_settings[KEY].groups = [];
     if (!extension_settings[KEY].pageSize) extension_settings[KEY].pageSize = 20;
+    if (typeof extension_settings[KEY].groupsHidden !== 'boolean') extension_settings[KEY].groupsHidden = false;
     saveSettingsDebounced();
 }
 function getGroups() { return extension_settings[KEY].groups; }
 function getPageSize() { return extension_settings[KEY].pageSize || 20; }
 function setPageSize(n) { extension_settings[KEY].pageSize = n; saveSettingsDebounced(); }
+function isGroupsHidden() { return !!extension_settings[KEY].groupsHidden; }
+function setGroupsHidden(v) { extension_settings[KEY].groupsHidden = !!v; saveSettingsDebounced(); }
 function saveGroups() { saveSettingsDebounced(); }
 function createGroup(name) {
     const id = 'g_' + Date.now() + '_' + Math.random().toString(36).slice(2,7);
@@ -41,8 +44,7 @@ function movePersonas(avatars, targetId) {
 }
 
 // ========== 工具 ==========
-// ⭐ 核心：用原生 getUserAvatars 取真实列表（自动过滤孤儿/损坏数据）
-let _validAvatars = null;       // 缓存的有效 avatar 列表（来自 /api/avatars/get）
+let _validAvatars = null;
 let _validAvatarsSet = null;
 
 async function refreshValidAvatars() {
@@ -59,7 +61,6 @@ async function refreshValidAvatars() {
             console.warn('[' + EXT_NAME + '] getUserAvatars failed:', e);
         }
     }
-    // fallback：用 power_user.personas keys + 简单过滤
     const personas = power_user.personas || {};
     _validAvatars = Object.keys(personas).filter(key => {
         if (!/[.\-_]/.test(key) && !/^\d/.test(key)) return false;
@@ -72,7 +73,6 @@ async function refreshValidAvatars() {
 
 function getAllAvatars() {
     if (_validAvatars) return _validAvatars;
-    // 还没加载完时的兜底（同步降级）
     const personas = power_user.personas || {};
     return Object.keys(personas).filter(key => {
         if (!/[.\-_]/.test(key) && !/^\d/.test(key)) return false;
@@ -84,7 +84,7 @@ function getAllAvatars() {
 
 function isValidAvatar(a) {
     if (_validAvatarsSet) return _validAvatarsSet.has(a);
-    return true; // 还没加载就先放行
+    return true;
 }
 
 function getName(a) {
@@ -220,6 +220,7 @@ function refreshMain() {
 function renderToolbar() {
     const t = document.getElementById(TOOLBAR_ID);
     if (!t) return;
+    const hidden = isGroupsHidden();
     let html = '<div class="pg-toolbar">';
     html += '<select class="pg-filter">';
     html += '<option value="all"' + (state.filter==='all'?' selected':'') + '>全部</option>';
@@ -228,6 +229,7 @@ function renderToolbar() {
     html += '</select>';
     html += '<button class="menu_button pg-btn-newgroup" title="新建分组"><i class="fa-solid fa-folder-plus"></i></button>';
     html += '<button class="menu_button pg-btn-selectmode' + (state.selectMode?' pg-active':'') + '" title="多选模式"><i class="fa-solid fa-check-double"></i></button>';
+    html += '<button class="menu_button pg-btn-toggle-groups' + (hidden?' pg-active':'') + '" title="' + (hidden?'显示分组':'隐藏分组') + '"><i class="fa-solid ' + (hidden?'fa-eye-slash':'fa-eye') + '"></i></button>';
     html += '</div>';
 
     if (state.selectMode) {
@@ -254,6 +256,12 @@ function bindToolbar(t) {
     });
     const sm = t.querySelector('.pg-btn-selectmode');
     if (sm) sm.addEventListener('click', () => { state.selectMode = !state.selectMode; state.selected.clear(); refreshMain(); });
+    const tg = t.querySelector('.pg-btn-toggle-groups');
+    if (tg) tg.addEventListener('click', () => {
+        setGroupsHidden(!isGroupsHidden());
+        state.page = 0;
+        refreshMain();
+    });
 
     if (state.selectMode) {
         const cb = t.querySelector('.pg-btn-clear-sel');
@@ -277,11 +285,15 @@ function renderPager(totalPages) {
     if (state.page >= totalPages) state.page = totalPages - 1;
     if (state.page < 0) state.page = 0;
     const pageSize = getPageSize();
+    const isFirst = state.page === 0;
+    const isLast = state.page >= totalPages - 1;
 
     let html = '<div class="pg-pager-inner">';
-    html += '<button class="menu_button pg-pager-prev"' + (state.page === 0 ? ' disabled' : '') + ' title="上一页"><i class="fa-solid fa-chevron-left"></i></button>';
+    html += '<button class="menu_button pg-pager-first pg-pager-edge"' + (isFirst ? ' disabled' : '') + ' title="首页"><i class="fa-solid fa-angles-left"></i></button>';
+    html += '<button class="menu_button pg-pager-prev"' + (isFirst ? ' disabled' : '') + ' title="上一页"><i class="fa-solid fa-chevron-left"></i></button>';
     html += '<span class="pg-pager-info">' + (state.page + 1) + '/' + totalPages + '</span>';
-    html += '<button class="menu_button pg-pager-next"' + (state.page >= totalPages - 1 ? ' disabled' : '') + ' title="下一页"><i class="fa-solid fa-chevron-right"></i></button>';
+    html += '<button class="menu_button pg-pager-next"' + (isLast ? ' disabled' : '') + ' title="下一页"><i class="fa-solid fa-chevron-right"></i></button>';
+    html += '<button class="menu_button pg-pager-last pg-pager-edge"' + (isLast ? ' disabled' : '') + ' title="末页"><i class="fa-solid fa-angles-right"></i></button>';
     html += '<select class="pg-pager-size" title="每页数量">';
     [5, 10, 25, 50, 100, 200].forEach(n => {
         html += '<option value="' + n + '"' + (pageSize === n ? ' selected' : '') + '>' + n + '</option>';
@@ -290,10 +302,14 @@ function renderPager(totalPages) {
     html += '</div>';
     p.innerHTML = html;
 
+    const first = p.querySelector('.pg-pager-first');
+    if (first) first.addEventListener('click', () => { state.page = 0; reorganizeNative(); });
     const prev = p.querySelector('.pg-pager-prev');
     if (prev) prev.addEventListener('click', () => { state.page--; reorganizeNative(); });
     const next = p.querySelector('.pg-pager-next');
     if (next) next.addEventListener('click', () => { state.page++; reorganizeNative(); });
+    const last = p.querySelector('.pg-pager-last');
+    if (last) last.addEventListener('click', () => { state.page = totalPages - 1; reorganizeNative(); });
     const size = p.querySelector('.pg-pager-size');
     if (size) size.addEventListener('change', e => {
         setPageSize(parseInt(e.target.value, 10));
@@ -306,11 +322,9 @@ async function reorganizeNative() {
     const block = document.getElementById('user_avatar_block');
     if (!block) return;
 
-    // ⭐ 保存滚动位置（修复"切换人设跳到顶部"）
     const scrollContainer = document.getElementById('PersonaManagement');
     const savedScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
 
-    // ⭐ 拉取最新有效列表（异步，但不阻塞首次渲染）
     if (!_validAvatars) {
         await refreshValidAvatars();
     }
@@ -339,7 +353,6 @@ async function reorganizeNative() {
         } finally {
             requestAnimationFrame(() => {
                 isReorganizing = false;
-                // ⭐ 还原滚动位置
                 if (scrollContainer && savedScrollTop > 0) {
                     scrollContainer.scrollTop = savedScrollTop;
                 }
@@ -353,6 +366,7 @@ async function reorganizeNative() {
 
     isReorganizing = true;
     try {
+        // 还原已有分组容器
         block.querySelectorAll(':scope > .pg-group-wrapper').forEach(w => {
             const body = w.querySelector('.pg-group-body');
             if (body) {
@@ -372,10 +386,8 @@ async function reorganizeNative() {
         const cardMap = new Map();
         for (const c of allCards) {
             const id = getCardAvatarId(c);
-            // ⭐ 只把有效 avatar 放进 cardMap（孤儿卡片直接隐藏）
             if (id && isValidAvatar(id) && !cardMap.has(id)) cardMap.set(id, c);
         }
-        // 全部隐藏（包括孤儿卡片，它们不会被加进任何分组/未分组区，等于隐藏）
         allCards.forEach(c => c.style.display = 'none');
 
         const passFilter = (avatar) => {
@@ -390,82 +402,94 @@ async function reorganizeNative() {
         const allAvatars = getAllAvatars().filter(a => cardMap.has(a));
         const ungroupedAvatars = allAvatars.filter(a => !groupedSet.has(a));
 
-        const contentAvatars = [];
-        for (const g of groups) {
-            if (g.collapsed) continue;
-            // 分组里也只显示有效 avatar
-            const visible = g.personas.filter(a => cardMap.has(a) && passFilter(a));
-            for (const a of visible) contentAvatars.push({ avatar: a, groupId: g.id });
-        }
-        for (const a of ungroupedAvatars) {
-            if (passFilter(a)) contentAvatars.push({ avatar: a, groupId: null });
-        }
+        const hidden = isGroupsHidden();
 
+        // ========== 分页逻辑 ==========
+        // 方案 B：分组永远完整显示，分页只控制未分组区
+        // 隐藏分组：只渲染未分组卡片，分组+其内卡片一律不显示
+        const ungroupedFiltered = ungroupedAvatars.filter(passFilter);
         const pageSize = getPageSize();
-        const totalPages = Math.max(1, Math.ceil(contentAvatars.length / pageSize));
+        const totalPages = Math.max(1, Math.ceil(ungroupedFiltered.length / pageSize));
         if (state.page >= totalPages) state.page = totalPages - 1;
         if (state.page < 0) state.page = 0;
         const start = state.page * pageSize;
         const end = start + pageSize;
-        const pageItems = contentAvatars.slice(start, end);
-        const showSet = new Set(pageItems.map(x => x.avatar));
+        const ungroupedPageItems = ungroupedFiltered.slice(start, end);
+        const ungroupedPageSet = new Set(ungroupedPageItems);
 
+        // 1) 构建分组容器（仅在未隐藏时）
         const fragmentsToPrepend = [];
-        for (const g of groups) {
-            const totalInGroup = g.personas.filter(a => cardMap.has(a) && passFilter(a)).length;
-            const totalPersonasInGroup = g.personas.filter(a => cardMap.has(a)).length;
-            if (totalPersonasInGroup > 0 && totalInGroup === 0) continue;
+        if (!hidden) {
+            for (const g of groups) {
+                const visibleInGroup = g.personas.filter(a => cardMap.has(a) && passFilter(a));
+                const totalPersonasInGroup = g.personas.filter(a => cardMap.has(a)).length;
+                // 筛选下空的分组：跳过（保持原来的行为）
+                if (totalPersonasInGroup > 0 && visibleInGroup.length === 0) continue;
 
-            const wrapper = document.createElement('div');
-            wrapper.className = 'pg-group-wrapper' + (g.collapsed ? ' pg-collapsed' : '');
-            if (totalPersonasInGroup === 0) wrapper.classList.add('pg-empty');
-            wrapper.dataset.gid = g.id;
+                const wrapper = document.createElement('div');
+                wrapper.className = 'pg-group-wrapper' + (g.collapsed ? ' pg-collapsed' : '');
+                if (totalPersonasInGroup === 0) wrapper.classList.add('pg-empty');
+                wrapper.dataset.gid = g.id;
 
-            const header = document.createElement('div');
-            header.className = 'pg-group-header';
-            const countText = totalPersonasInGroup === 0 ? '空' : totalInGroup;
-            header.innerHTML =
-                '<i class="fa-solid fa-chevron-down pg-toggle"></i>' +
-                '<span class="pg-group-name">' + esc(g.name) + '</span>' +
-                '<span class="pg-group-count">' + countText + '</span>' +
-                '<div class="pg-group-actions">' +
-                '<i class="fa-solid fa-pen pg-btn-rename" title="重命名"></i>' +
-                '<i class="fa-solid fa-trash pg-btn-delgroup" title="删除分组"></i>' +
-                '</div>';
-            wrapper.appendChild(header);
+                const header = document.createElement('div');
+                header.className = 'pg-group-header';
+                const countText = totalPersonasInGroup === 0 ? '空' : visibleInGroup.length;
+                header.innerHTML =
+                    '<i class="fa-solid fa-chevron-down pg-toggle"></i>' +
+                    '<span class="pg-group-name">' + esc(g.name) + '</span>' +
+                    '<span class="pg-group-count">' + countText + '</span>' +
+                    '<div class="pg-group-actions">' +
+                    '<i class="fa-solid fa-pen pg-btn-rename" title="重命名"></i>' +
+                    '<i class="fa-solid fa-trash pg-btn-delgroup" title="删除分组"></i>' +
+                    '</div>';
+                wrapper.appendChild(header);
 
-            const body = document.createElement('div');
-            body.className = 'pg-group-body';
-            if (!g.collapsed && totalPersonasInGroup > 0) {
-                for (const a of g.personas) {
-                    if (showSet.has(a)) {
-                        const card = cardMap.get(a);
-                        if (card) {
-                            card.style.display = '';
-                            body.appendChild(card);
+                const body = document.createElement('div');
+                body.className = 'pg-group-body';
+                if (!g.collapsed && totalPersonasInGroup > 0) {
+                    // 方案 B：分组里的卡片全部显示，不分页
+                    for (const a of g.personas) {
+                        if (cardMap.has(a) && passFilter(a)) {
+                            const card = cardMap.get(a);
+                            if (card) {
+                                card.style.display = '';
+                                body.appendChild(card);
+                            }
                         }
                     }
+                } else if (!g.collapsed && totalPersonasInGroup === 0) {
+                    body.innerHTML = '<div class="pg-empty-hint">暂无人设，请用多选模式将人设移入此分组</div>';
                 }
-            } else if (!g.collapsed && totalPersonasInGroup === 0) {
-                body.innerHTML = '<div class="pg-empty-hint">暂无人设，请用多选模式将人设移入此分组</div>';
+                wrapper.appendChild(body);
+                fragmentsToPrepend.push(wrapper);
             }
-            wrapper.appendChild(body);
-            fragmentsToPrepend.push(wrapper);
+
+            for (let i = fragmentsToPrepend.length - 1; i >= 0; i--) {
+                block.insertBefore(fragmentsToPrepend[i], block.firstChild);
+            }
         }
 
-        for (let i = fragmentsToPrepend.length - 1; i >= 0; i--) {
-            block.insertBefore(fragmentsToPrepend[i], block.firstChild);
-        }
-
-        const showSetUngrouped = new Set(
-            pageItems.filter(x => x.groupId === null).map(x => x.avatar)
-        );
-        for (const a of ungroupedAvatars) {
-            const card = cardMap.get(a);
-            if (!card) continue;
-            if (showSetUngrouped.has(a)) {
-                card.style.display = '';
-                block.appendChild(card);
+        // 2) 显示当前页的"未分组"卡片（隐藏模式下：所有卡片都视作"未分组"，但仍按 ungrouped 顺序）
+        // 隐藏模式下，分组里的卡片已经被全部隐藏（不在 ungroupedPageSet 里），所以只需正常处理 ungrouped
+        if (hidden) {
+            // 隐藏模式：只显示未分组里当前页的卡片
+            for (const a of ungroupedAvatars) {
+                const card = cardMap.get(a);
+                if (!card) continue;
+                if (ungroupedPageSet.has(a)) {
+                    card.style.display = '';
+                    block.appendChild(card);
+                }
+            }
+        } else {
+            // 正常模式：未分组卡片按页显示，已分组卡片已经在分组容器里了
+            for (const a of ungroupedAvatars) {
+                const card = cardMap.get(a);
+                if (!card) continue;
+                if (ungroupedPageSet.has(a)) {
+                    card.style.display = '';
+                    block.appendChild(card);
+                }
             }
         }
 
@@ -475,7 +499,6 @@ async function reorganizeNative() {
     } finally {
         requestAnimationFrame(() => {
             isReorganizing = false;
-            // ⭐ 还原滚动位置
             if (scrollContainer && savedScrollTop > 0) {
                 scrollContainer.scrollTop = savedScrollTop;
             }
@@ -853,7 +876,7 @@ jQuery(async () => {
     initStorage();
     await loadPersonaApi();
     loadPopper();
-    await refreshValidAvatars();   // ⭐ 启动时拉一次有效列表
+    await refreshValidAvatars();
 
     try { initMainPanel(); console.log('[' + EXT_NAME + '] Main panel initialized.'); }
     catch (err) { console.error('[' + EXT_NAME + '] Main panel init failed:', err); }
@@ -867,7 +890,7 @@ jQuery(async () => {
     }
 
     const refreshAll = async () => {
-        await refreshValidAvatars();   // ⭐ 设置变化时刷新有效列表
+        await refreshValidAvatars();
         try { refreshMain(); } catch(e){}
         try { refreshQuick(); } catch(e){}
     };
