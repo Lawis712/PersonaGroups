@@ -1,12 +1,13 @@
 {
-  "display_name": "Persona Groups",
+  "display_name": "用户人设分组",
   "loading_order": 10,
   "requires": [],
   "optional": [],
   "js": "index.js",
   "css": "style.css",
-  "author": "你的名字",
+  "author": "",
   "version": "1.0.0",
-  "homePage": "https://github.com/yourname/SillyTavern-PersonaGroups",
+  "license": "AGPL-3.0",
+  "homePage": "https://github.com/<你的用户名>/SillyTavern-PersonaGroups",
   "auto_update": true
 }
