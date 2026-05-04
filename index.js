@@ -1,6 +1,6 @@
 /**
  * SillyTavern Persona Groups (用户人设分组)
- * Copyright (C) 2026  <Lavi>
+ * Copyright (C) 2026  Lavi
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as published
@@ -17,7 +17,7 @@
  *
  * ---
  * Based on / inspired by the Quick Persona extension from SillyTavern
- * (part of the SillyTavern project, https://github.com/SillyTavern/SillyTavern)
+ * (https://github.com/SillyTavern/Extension-QuickPersona.git)
  * Licensed under AGPL-3.0
  */
 
@@ -359,7 +359,7 @@ function renderToolbar() {
 
     const groups = getGroups();
     if (groups.length > 0) {
-        html += '<optgroup label="────୨ৎ──── 按分组 ────୨ৎ────">';
+        html += '<optgroup label="───୨ৎ─按分组─୨ৎ───">';
         for (const g of groups) {
             const v = 'group:' + g.id;
             html += '<option value="' + esc(v) + '"' + (state.filter===v?' selected':'') + '>' + esc(g.name) + '</option>';
