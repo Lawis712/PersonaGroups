@@ -32,7 +32,7 @@ This project is licensed under **GNU AGPL-3.0** - see the [LICENSE](LICENSE) fil
 ## Credits
 
 This project is based on / inspired by the **Quick Persona** extension from SillyTavern,  
-which is part of the [SillyTavern](https://github.com/SillyTavern/SillyTavern) project,  
+[which is part of the [SillyTavern] project, ](https://github.com/SillyTavern/Extension-QuickPersona.git) 
 also licensed under AGPL-3.0.
 
 The quick switcher popup design (Position 2) follows the pattern from Quick Persona,  
