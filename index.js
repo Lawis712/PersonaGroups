@@ -1,6 +1,6 @@
 /**
  * SillyTavern Persona Groups (用户人设分组)
- * Copyright (C) 2026  Lavi
+ * Copyright (C) 2026  <Lavi>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as published
@@ -16,8 +16,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *
  * ---
- * Based on / inspired by the Quick Persona extension
- * (https://github.com/SillyTavern/Extension-QuickPersona.git)
+ * Based on / inspired by the Quick Persona extension from SillyTavern
+ * (part of the SillyTavern project, https://github.com/SillyTavern/SillyTavern)
  * Licensed under AGPL-3.0
  */
 
@@ -42,7 +42,7 @@ function initStorage() {
             pageSize: 20,
             version: 2,
             groupsHidden: false,
-            quickEnabled: true,        // ⭐ 默认启用位置二
+            quickEnabled: true,
         };
         saveSettingsDebounced();
     }
@@ -157,7 +157,6 @@ function getFilterGroupId() {
     return state.filter.slice('group:'.length);
 }
 
-// 检查 ST 自带 Quick Persona 是否启用
 function isStQuickPersonaEnabled() {
     const qp = extension_settings.quickPersona;
     return !!(qp && qp.enabled === true);
@@ -266,11 +265,9 @@ function initExtensionSettings() {
 
     updateUI();
 
-    // 监听设置变化时刷新 UI 状态（比如用户在扩展面板里打开/关闭了 Quick Persona）
     if (eventSource && event_types && event_types.SETTINGS_UPDATED) {
         eventSource.on(event_types.SETTINGS_UPDATED, () => {
             updateUI();
-            // 如果 Quick Persona 状态变化，自动调整本插件
             const shouldShow = isQuickEnabled() && !isStQuickPersonaEnabled();
             const exists = !!document.getElementById(BTN_ID);
             if (shouldShow && !exists) initQuick();
@@ -362,7 +359,7 @@ function renderToolbar() {
 
     const groups = getGroups();
     if (groups.length > 0) {
-        html += '<optgroup label="───୨ৎ─按分组─୨ৎ───">';
+        html += '<optgroup label="────୨ৎ──── 按分组 ────୨ৎ────">';
         for (const g of groups) {
             const v = 'group:' + g.id;
             html += '<option value="' + esc(v) + '"' + (state.filter===v?' selected':'') + '>' + esc(g.name) + '</option>';
@@ -694,6 +691,15 @@ async function ensureAllCardsInDom() {
             el.textContent = getName(avatar);
         });
 
+        // ⭐ 修复：用真实描述填充 .ch_description，避免显示模板那段描述
+        const realDesc = (power_user.persona_descriptions || {})[avatar]?.description || '';
+        clone.querySelectorAll('.ch_description').forEach(el => {
+            el.textContent = realDesc;
+        });
+        clone.querySelectorAll('.ch_additional_info').forEach(el => {
+            el.textContent = '';
+        });
+
         delete clone.dataset.pgClickHooked;
 
         clone.addEventListener('click', async (e) => {
@@ -830,7 +836,6 @@ function initQuick() {
     };
     tryInject();
 
-    // 保证全局 click 委托只挂一次
     if (!window.__pg_body_click_hooked) {
         window.__pg_body_click_hooked = true;
         window.jQuery(document.body).on('click.pgQuick', (e) => {
