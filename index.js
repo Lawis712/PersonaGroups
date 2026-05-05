@@ -17,7 +17,7 @@
  *
  * ---
  * Based on / inspired by the Quick Persona extension from SillyTavern
- * (https://github.com/SillyTavern/Extension-QuickPersona.git)
+ * (part of the SillyTavern project, https://github.com/SillyTavern/Extension-QuickPersona.git)
  * Licensed under AGPL-3.0
  */
 
@@ -691,14 +691,29 @@ async function ensureAllCardsInDom() {
             el.textContent = getName(avatar);
         });
 
-        // ⭐ 修复：用真实描述填充 .ch_description，避免显示模板那段描述
-        const realDesc = (power_user.persona_descriptions || {})[avatar]?.description || '';
+        // 修复：用真实描述填充 .ch_description
+        const desc = (power_user.persona_descriptions || {})[avatar] || {};
+        const realDesc = desc.description || '';
         clone.querySelectorAll('.ch_description').forEach(el => {
             el.textContent = realDesc;
         });
-        clone.querySelectorAll('.ch_additional_info').forEach(el => {
-            el.textContent = '';
-        });
+
+        // ⭐ 修复：根据真实 title 决定显示/隐藏 .ch_additional_info
+        const realTitle = (typeof desc.title === 'string') ? desc.title.trim() : '';
+        const nameBlock = clone.querySelector('.character_name_block');
+        let infoEl = clone.querySelector('.ch_additional_info');
+        if (realTitle) {
+            // 有备注 —— 确保元素存在并填入真实备注
+            if (!infoEl && nameBlock) {
+                infoEl = document.createElement('small');
+                infoEl.className = 'ch_additional_info';
+                nameBlock.appendChild(infoEl);
+            }
+            if (infoEl) infoEl.textContent = realTitle;
+        } else {
+            // 没备注 —— 移除元素（与 ST 原生行为一致）
+            if (infoEl) infoEl.remove();
+        }
 
         delete clone.dataset.pgClickHooked;
 
