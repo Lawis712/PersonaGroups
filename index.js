@@ -40,16 +40,22 @@ function initStorage() {
         extension_settings[KEY] = {
             groups: [],
             pageSize: 20,
-            version: 2,
+            version: 3,
             groupsHidden: false,
             quickEnabled: true,
         };
         saveSettingsDebounced();
     }
-    if (!extension_settings[KEY].groups) extension_settings[KEY].groups = [];
-    if (!extension_settings[KEY].pageSize) extension_settings[KEY].pageSize = 20;
-    if (typeof extension_settings[KEY].groupsHidden !== 'boolean') extension_settings[KEY].groupsHidden = false;
-    if (typeof extension_settings[KEY].quickEnabled !== 'boolean') extension_settings[KEY].quickEnabled = true;
+    const s = extension_settings[KEY];
+    if (!s.groups) s.groups = [];
+    if (!s.pageSize) s.pageSize = 20;
+    if (typeof s.groupsHidden !== 'boolean') s.groupsHidden = false;
+    if (typeof s.quickEnabled !== 'boolean') s.quickEnabled = true;
+    // 清理历史废弃字段（排序 / 置顶）
+    if ('sortEnabled' in s) delete s.sortEnabled;
+    if ('ungroupedOrder' in s) delete s.ungroupedOrder;
+    if ('pinned' in s) delete s.pinned;
+    s.version = 3;
     saveSettingsDebounced();
 }
 function getGroups() { return extension_settings[KEY].groups; }
@@ -61,27 +67,42 @@ function isQuickEnabled() { return !!extension_settings[KEY].quickEnabled; }
 function setQuickEnabled(v) { extension_settings[KEY].quickEnabled = !!v; saveSettingsDebounced(); }
 function saveGroups() { saveSettingsDebounced(); }
 function createGroup(name) {
-    const id = 'g_' + Date.now() + '_' + Math.random().toString(36).slice(2,7);
+    const id = 'g_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
     getGroups().push({ id, name: name || '新分组', collapsed: false, personas: [] });
     saveGroups();
 }
-function renameGroup(id, n) { const g = getGroups().find(x=>x.id===id); if(g){g.name=n;saveGroups();} }
-function deleteGroup(id) { const gs = getGroups(); const i = gs.findIndex(x=>x.id===id); if(i>=0){gs.splice(i,1);saveGroups();} }
-function toggleCollapse(id) { const g = getGroups().find(x=>x.id===id); if(g){g.collapsed=!g.collapsed;saveGroups();} }
+function renameGroup(id, n) { const g = getGroups().find(x => x.id === id); if (g) { g.name = n; saveGroups(); } }
+function deleteGroup(id) { const gs = getGroups(); const i = gs.findIndex(x => x.id === id); if (i >= 0) { gs.splice(i, 1); saveGroups(); } }
+function setCollapsed(id, v) { const g = getGroups().find(x => x.id === id); if (g) { g.collapsed = !!v; saveGroups(); } }
+function isCollapsed(id) { const g = getGroups().find(x => x.id === id); return g ? !!g.collapsed : false; }
 function movePersonas(avatars, targetId) {
-    for (const g of getGroups()) g.personas = g.personas.filter(a=>!avatars.includes(a));
+    for (const g of getGroups()) g.personas = g.personas.filter(a => !avatars.includes(a));
     if (targetId) {
-        const t = getGroups().find(x=>x.id===targetId);
+        const t = getGroups().find(x => x.id === targetId);
         if (t) for (const a of avatars) if (!t.personas.includes(a)) t.personas.push(a);
     }
     saveGroups();
 }
 
-// ========== 工具 ==========
+// ========== 缓存 ==========
 let _validAvatars = null;
 let _validAvatarsSet = null;
+let _lastAvatarRefresh = 0;
+let _aidCache = new WeakMap();   // element -> avatarId
+let _boundCache = new Map();     // avatar -> bool
+let _searchIndex = new Map();    // avatar -> lowercase blob
+let _lastSig = '';               // 列表内容签名，用于跳过无意义的重排
 
-async function refreshValidAvatars() {
+function invalidateCaches() {
+    _aidCache = new WeakMap();
+    _boundCache.clear();
+    _searchIndex.clear();
+}
+
+async function refreshValidAvatars(force = false) {
+    const now = Date.now();
+    if (!force && _validAvatars && (now - _lastAvatarRefresh) < 1500) return;
+    _lastAvatarRefresh = now;
     await loadPersonaApi();
     if (_getUserAvatars) {
         try {
@@ -89,6 +110,7 @@ async function refreshValidAvatars() {
             if (Array.isArray(list)) {
                 _validAvatars = list;
                 _validAvatarsSet = new Set(list);
+                invalidateCaches();
                 return;
             }
         } catch (e) {
@@ -103,6 +125,7 @@ async function refreshValidAvatars() {
         return true;
     });
     _validAvatarsSet = new Set(_validAvatars);
+    invalidateCaches();
 }
 
 function getAllAvatars() {
@@ -128,29 +151,58 @@ function getName(a) {
     return raw || a;
 }
 function getAvatarUrl(a) { return '/thumbnail?type=persona&file=' + encodeURIComponent(a); }
+
+function getPersonaTitle(a) {
+    const desc = (power_user.persona_descriptions || {})[a];
+    if (!desc) return '';
+    return (typeof desc.title === 'string') ? desc.title : '';
+}
+function getPersonaDescription(a) {
+    const desc = (power_user.persona_descriptions || {})[a];
+    if (!desc) return '';
+    return (typeof desc.description === 'string') ? desc.description : '';
+}
+
 function isBound(a) {
+    if (_boundCache.has(a)) return _boundCache.get(a);
+    let result = false;
     const desc = (power_user.persona_descriptions || {})[a];
     if (desc) {
-        if (desc.position === 'character') return true;
-        if (Array.isArray(desc.connections) && desc.connections.length > 0) return true;
-        if (desc.lockedFor && Array.isArray(desc.lockedFor) && desc.lockedFor.length > 0) return true;
+        if (desc.position === 'character') result = true;
+        else if (Array.isArray(desc.connections) && desc.connections.length > 0) result = true;
+        else if (Array.isArray(desc.lockedFor) && desc.lockedFor.length > 0) result = true;
     }
-    const lockObjs = [power_user.personas_lock, power_user.lockedPersonas, power_user.persona_lock];
-    for (const lock of lockObjs) {
-        if (!lock || typeof lock !== 'object') continue;
-        if (lock[a] !== undefined && lock[a] !== null && lock[a] !== '') return true;
-        for (const k in lock) if (lock[k] === a) return true;
+    if (!result) {
+        const lockObjs = [power_user.personas_lock, power_user.lockedPersonas, power_user.persona_lock];
+        for (const lock of lockObjs) {
+            if (!lock || typeof lock !== 'object') continue;
+            if (lock[a] !== undefined && lock[a] !== null && lock[a] !== '') { result = true; break; }
+            let hit = false;
+            for (const k in lock) if (lock[k] === a) { hit = true; break; }
+            if (hit) { result = true; break; }
+        }
     }
-    if (Array.isArray(power_user.persona_locked_chats) && power_user.persona_locked_chats.includes(a)) return true;
-    return false;
+    if (!result && Array.isArray(power_user.persona_locked_chats) && power_user.persona_locked_chats.includes(a)) {
+        result = true;
+    }
+    _boundCache.set(a, result);
+    return result;
 }
+
+// 缓存版，避免一轮渲染里成百上千次 querySelector
 function getCardAvatarId(card) {
+    if (!card) return null;
+    const cached = _aidCache.get(card);
+    if (cached !== undefined) return cached;
+    let id = null;
     const inner = card.querySelector('.avatar[data-avatar-id]') || card.querySelector('[data-avatar-id]');
-    if (inner && inner.dataset.avatarId) return inner.dataset.avatarId;
-    if (card.dataset && card.dataset.avatarId) return card.dataset.avatarId;
-    return null;
+    if (inner && inner.dataset.avatarId) id = inner.dataset.avatarId;
+    else if (card.dataset && card.dataset.avatarId) id = card.dataset.avatarId;
+    _aidCache.set(card, id);
+    return id;
 }
-function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
 function getFilterGroupId() {
     if (!state.filter || !state.filter.startsWith('group:')) return null;
@@ -160,6 +212,126 @@ function getFilterGroupId() {
 function isStQuickPersonaEnabled() {
     const qp = extension_settings.quickPersona;
     return !!(qp && qp.enabled === true);
+}
+
+// 搜索索引：一次小写化，之后每次敲键只做 includes
+function getSearchBlob(avatar) {
+    let blob = _searchIndex.get(avatar);
+    if (blob === undefined) {
+        blob = (getName(avatar) + '\n' + getPersonaTitle(avatar) + '\n' +
+            getPersonaDescription(avatar) + '\n' + avatar).toLowerCase();
+        _searchIndex.set(avatar, blob);
+    }
+    return blob;
+}
+function matchesSearch(avatar, query) {
+    if (!query) return true;
+    return getSearchBlob(avatar).includes(query.toLowerCase());
+}
+
+function setShown(el, shown) {
+    const want = shown ? '' : 'none';
+    if (el.style.display !== want) el.style.display = want;
+}
+
+// 列表内容签名：内容没变就不重排（切换人设时省掉整轮重绘）
+function computeListSignature() {
+    const avatars = getAllAvatars();
+    let sig = 'n' + avatars.length + '|f' + state.filter + '|p' + state.page
+        + '|s' + getPageSize() + '|h' + (isGroupsHidden() ? 1 : 0) + '|q' + state.search.trim();
+    for (const g of getGroups()) sig += '|' + g.id + ':' + g.name + ':' + g.personas.length;
+    for (const a of avatars) sig += '|' + a + '=' + getName(a) + '#' + getPersonaTitle(a);
+    return sig;
+}
+
+// ========== 懒加载兼容层 ==========
+// 其他插件（图片懒加载类）会把真实地址搬到 data-src 等属性，把 src 换成透明占位图，
+// 再用 IntersectionObserver 还原。两个问题：
+//   1) 克隆卡片会继承模板卡的 data-src，被“还原”成同一张头像
+//   2) 它和我们互相改写 src，造成抖动
+// 对策：清理懒加载属性 + 用 background-image 兜底（src 被换掉也不影响观感）+ 纠正次数上限
+const LAZY_ATTR_RE = /^data-.*(lazy|src|origin|echo|defer|thumb)/i;
+
+function ensureAvatarPaint(img, url) {
+    if (img.dataset.pgPainted === url) return;
+    img.dataset.pgPainted = url;
+    img.style.backgroundImage = 'url("' + url + '")';
+    img.style.backgroundSize = 'cover';
+    img.style.backgroundPosition = 'center';
+    img.style.backgroundRepeat = 'no-repeat';
+}
+
+function sanitizeLazyImg(img, url) {
+    for (const attr of Array.from(img.attributes)) {
+        if (LAZY_ATTR_RE.test(attr.name)) img.removeAttribute(attr.name);
+    }
+    img.removeAttribute('srcset');
+    img.removeAttribute('sizes');
+    if (img.classList && img.classList.length) {
+        Array.from(img.classList).forEach(cls => {
+            if (/lazy/i.test(cls)) img.classList.remove(cls);
+        });
+    }
+    img.setAttribute('loading', 'eager');
+    img.dataset.pgNoLazy = '1';
+    if (url) {
+        ensureAvatarPaint(img, url);
+        img.src = url;
+    }
+}
+
+function imgSrcMatchesAvatar(img, avatar) {
+    const src = img.getAttribute('src');
+    if (!src) return false;
+    let dec = src;
+    try { dec = decodeURIComponent(src); } catch (e) { /* 保持原值 */ }
+    return dec.includes(avatar);
+}
+
+// 修单张图，带循环保护：3 秒内同一张最多纠正 3 次，避免与懒加载插件互改死循环
+function repairOneImg(img) {
+    const card = img.closest ? img.closest('.avatar-container') : null;
+    if (!card) return false;
+    if (card.style.display === 'none') return false;
+    const avatar = getCardAvatarId(card);
+    if (!avatar) return false;
+    if (imgSrcMatchesAvatar(img, avatar)) return false;
+
+    const now = Date.now();
+    const last = Number(img.dataset.pgFixAt || 0);
+    let n = Number(img.dataset.pgFixN || 0);
+    if (now - last > 3000) n = 0;
+    if (n >= 3) {
+        // 放弃抢 src，靠背景图保证显示正确
+        ensureAvatarPaint(img, getAvatarUrl(avatar));
+        return false;
+    }
+    img.dataset.pgFixAt = String(now);
+    img.dataset.pgFixN = String(n + 1);
+
+    sanitizeLazyImg(img, getAvatarUrl(avatar));
+    return true;
+}
+
+function repairAvatarImages(block) {
+    if (!block) return 0;
+    let fixed = 0;
+    block.querySelectorAll('.avatar-container img').forEach(img => {
+        if (repairOneImg(img)) fixed++;
+    });
+    if (fixed && window.__pgDebug) console.log('[' + EXT_NAME + '] repaired ' + fixed + ' avatar image(s)');
+    return fixed;
+}
+
+// 给可见卡片铺背景兜底（有 pgPainted 标记，重复调用几乎零成本）
+function paintVisibleCards(cards) {
+    for (const card of cards) {
+        if (card.style.display === 'none') continue;
+        const id = getCardAvatarId(card);
+        if (!id) continue;
+        const url = getAvatarUrl(id);
+        card.querySelectorAll('img').forEach(img => ensureAvatarPaint(img, url));
+    }
 }
 
 // ========== ST API ==========
@@ -206,6 +378,26 @@ async function switchPersona(avatar) {
 
 const state = { selectMode: false, selected: new Set(), filter: 'all', page: 0, search: '' };
 let isReorganizing = false;
+
+function isPanelVisible() {
+    const block = document.getElementById('user_avatar_block');
+    return !!(block && block.offsetParent !== null);
+}
+let _pendingRefresh = false;
+let _visibilityTimer = null;
+function markPendingRefresh() {
+    _pendingRefresh = true;
+    if (_visibilityTimer) return;
+    _visibilityTimer = setInterval(() => {
+        if (!_pendingRefresh) { clearInterval(_visibilityTimer); _visibilityTimer = null; return; }
+        if (isPanelVisible()) {
+            _pendingRefresh = false;
+            clearInterval(_visibilityTimer);
+            _visibilityTimer = null;
+            refreshMain();
+        }
+    }, 600);
+}
 
 // ========== 扩展设置面板 ==========
 function initExtensionSettings() {
@@ -256,11 +448,8 @@ function initExtensionSettings() {
     $cb.on('change', function () {
         const v = $(this).prop('checked');
         setQuickEnabled(v);
-        if (v && !isStQuickPersonaEnabled()) {
-            initQuick();
-        } else {
-            removeQuickBtn();
-        }
+        if (v && !isStQuickPersonaEnabled()) initQuick();
+        else removeQuickBtn();
     });
 
     updateUI();
@@ -282,7 +471,7 @@ function removeQuickBtn() {
     const popup = document.getElementById(POPUP_ID);
     if (popup) popup.remove();
     if (_popperInstance) {
-        try { _popperInstance.destroy(); } catch(e) {}
+        try { _popperInstance.destroy(); } catch (e) {}
         _popperInstance = null;
     }
 }
@@ -306,7 +495,7 @@ function initMainPanel() {
             toolbar.parentElement.insertBefore(pager, toolbar.nextSibling);
         }
         hideNativePagination();
-        syncNativeSearch();
+        hijackNativeSearch();
         renderToolbar();
         reorganizeNative();
     };
@@ -322,16 +511,26 @@ function hideNativePagination() {
     });
 }
 
-function syncNativeSearch() {
+let _searchDebounceTimer = null;
+function hijackNativeSearch() {
     const searchInput = document.getElementById('persona_search_bar');
     if (!searchInput) return;
-    if (searchInput.dataset.pgSearchHooked) return;
-    searchInput.dataset.pgSearchHooked = '1';
-    searchInput.addEventListener('input', () => {
-        state.search = searchInput.value || '';
-        state.page = 0;
-        reorganizeNative();
-    });
+    if (searchInput.dataset.pgHijacked === '1') return;
+    searchInput.dataset.pgHijacked = '1';
+
+    const handler = (e) => {
+        e.stopImmediatePropagation();
+        const val = searchInput.value || '';
+        clearTimeout(_searchDebounceTimer);
+        _searchDebounceTimer = setTimeout(() => {
+            state.search = val;
+            state.page = 0;
+            reorganizeNative();
+        }, 150);
+    };
+    searchInput.addEventListener('input', handler, true);
+    searchInput.addEventListener('change', handler, true);
+
     state.search = searchInput.value || '';
 }
 
@@ -353,24 +552,24 @@ function renderToolbar() {
 
     let html = '<div class="pg-toolbar">';
     html += '<select class="pg-filter">';
-    html += '<option value="all"' + (state.filter==='all'?' selected':'') + '>全部</option>';
-    html += '<option value="bound"' + (state.filter==='bound'?' selected':'') + '>已绑定</option>';
-    html += '<option value="unbound"' + (state.filter==='unbound'?' selected':'') + '>未绑定</option>';
+    html += '<option value="all"' + (state.filter === 'all' ? ' selected' : '') + '>全部</option>';
+    html += '<option value="bound"' + (state.filter === 'bound' ? ' selected' : '') + '>已绑定</option>';
+    html += '<option value="unbound"' + (state.filter === 'unbound' ? ' selected' : '') + '>未绑定</option>';
 
     const groups = getGroups();
     if (groups.length > 0) {
         html += '<optgroup label="───୨ৎ─按分组─୨ৎ───">';
         for (const g of groups) {
             const v = 'group:' + g.id;
-            html += '<option value="' + esc(v) + '"' + (state.filter===v?' selected':'') + '>' + esc(g.name) + '</option>';
+            html += '<option value="' + esc(v) + '"' + (state.filter === v ? ' selected' : '') + '>' + esc(g.name) + '</option>';
         }
         html += '</optgroup>';
     }
 
     html += '</select>';
     html += '<button class="menu_button pg-btn-newgroup" title="新建分组"><i class="fa-solid fa-folder-plus"></i></button>';
-    html += '<button class="menu_button pg-btn-selectmode' + (state.selectMode?' pg-active':'') + '" title="多选模式"><i class="fa-solid fa-check-double"></i></button>';
-    html += '<button class="menu_button pg-btn-toggle-groups' + (hidden?' pg-active':'') + '" title="' + (hidden?'显示分组':'隐藏分组') + '"><i class="fa-solid ' + (hidden?'fa-eye-slash':'fa-eye') + '"></i></button>';
+    html += '<button class="menu_button pg-btn-selectmode' + (state.selectMode ? ' pg-active' : '') + '" title="多选模式"><i class="fa-solid fa-check-double"></i></button>';
+    html += '<button class="menu_button pg-btn-toggle-groups' + (hidden ? ' pg-active' : '') + '" title="' + (hidden ? '显示分组' : '隐藏分组') + '"><i class="fa-solid ' + (hidden ? 'fa-eye-slash' : 'fa-eye') + '"></i></button>';
     html += '</div>';
 
     if (state.selectMode) {
@@ -383,6 +582,7 @@ function renderToolbar() {
         html += '<button class="menu_button pg-btn-clear-sel">清空</button>';
         html += '</div>';
     }
+
     t.innerHTML = html;
     bindToolbar(t);
 }
@@ -396,7 +596,11 @@ function bindToolbar(t) {
         if (n && n.trim()) { createGroup(n.trim()); refreshMain(); }
     });
     const sm = t.querySelector('.pg-btn-selectmode');
-    if (sm) sm.addEventListener('click', () => { state.selectMode = !state.selectMode; state.selected.clear(); refreshMain(); });
+    if (sm) sm.addEventListener('click', () => {
+        state.selectMode = !state.selectMode;
+        state.selected.clear();
+        refreshMain();
+    });
     const tg = t.querySelector('.pg-btn-toggle-groups');
     if (tg) tg.addEventListener('click', () => {
         setGroupsHidden(!isGroupsHidden());
@@ -459,6 +663,19 @@ function renderPager(totalPages) {
     });
 }
 
+function unwrapGroups(block) {
+    block.querySelectorAll(':scope > .pg-group-wrapper').forEach(w => {
+        const body = w.querySelector('.pg-group-body');
+        if (body) {
+            Array.from(body.children).forEach(child => {
+                if (child.classList.contains('avatar-container')) block.appendChild(child);
+            });
+        }
+        w.remove();
+    });
+    block.querySelectorAll(':scope > .pg-empty-hint').forEach(el => el.remove());
+}
+
 async function reorganizeNative() {
     const block = document.getElementById('user_avatar_block');
     if (!block) return;
@@ -466,37 +683,32 @@ async function reorganizeNative() {
     const scrollContainer = document.getElementById('PersonaManagement');
     const savedScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
 
-    if (!_validAvatars) {
-        await refreshValidAvatars();
-    }
+    invalidateCaches();
+    if (!_validAvatars) await refreshValidAvatars(true);
 
+    // 搜索模式：展平显示，不分组不分页
     if (state.search.trim()) {
         isReorganizing = true;
         try {
-            block.querySelectorAll(':scope > .pg-group-wrapper').forEach(w => {
-                const body = w.querySelector('.pg-group-body');
-                if (body) {
-                    Array.from(body.children).forEach(child => {
-                        if (child.classList.contains('avatar-container')) {
-                            block.appendChild(child);
-                        }
-                    });
-                }
-                w.remove();
+            unwrapGroups(block);
+            await ensureAllCardsInDom();
+
+            const q = state.search.trim();
+            const cards = Array.from(block.querySelectorAll(':scope > .avatar-container'));
+            cards.forEach(c => {
+                const id = getCardAvatarId(c);
+                setShown(c, !!id && matchesSearch(id, q));
             });
-            block.querySelectorAll(':scope > .pg-empty-hint').forEach(el => el.remove());
-            block.querySelectorAll(':scope > .avatar-container').forEach(c => {
-                c.style.display = '';
-            });
+
+            paintVisibleCards(cards);
             applySelectModeUI();
             const pager = document.getElementById(PAGER_ID);
             if (pager) pager.style.display = 'none';
         } finally {
+            _lastSig = computeListSignature();
             requestAnimationFrame(() => {
                 isReorganizing = false;
-                if (scrollContainer && savedScrollTop > 0) {
-                    scrollContainer.scrollTop = savedScrollTop;
-                }
+                if (scrollContainer && savedScrollTop > 0) scrollContainer.scrollTop = savedScrollTop;
             });
         }
         return;
@@ -507,19 +719,7 @@ async function reorganizeNative() {
 
     isReorganizing = true;
     try {
-        block.querySelectorAll(':scope > .pg-group-wrapper').forEach(w => {
-            const body = w.querySelector('.pg-group-body');
-            if (body) {
-                Array.from(body.children).forEach(child => {
-                    if (child.classList.contains('avatar-container')) {
-                        block.appendChild(child);
-                    }
-                });
-            }
-            w.remove();
-        });
-        block.querySelectorAll(':scope > .pg-empty-hint').forEach(el => el.remove());
-
+        unwrapGroups(block);
         await ensureAllCardsInDom();
 
         const allCards = Array.from(block.querySelectorAll(':scope > .avatar-container'));
@@ -528,7 +728,6 @@ async function reorganizeNative() {
             const id = getCardAvatarId(c);
             if (id && isValidAvatar(id) && !cardMap.has(id)) cardMap.set(id, c);
         }
-        allCards.forEach(c => c.style.display = 'none');
 
         const filterGroupId = getFilterGroupId();
         const isFilteringByGroup = !!filterGroupId;
@@ -549,29 +748,30 @@ async function reorganizeNative() {
 
         let pageItemsForDisplay = [];
         let totalPages = 1;
+        const pageSize = getPageSize();
+        // 先算出该显示哪些卡，最后统一切 display，避免“全隐藏再全显示”的抖动
+        const shouldShow = new Set();
 
         if (isFilteringByGroup) {
             const targetGroup = groups.find(g => g.id === filterGroupId);
-            const groupAvatars = targetGroup
-                ? targetGroup.personas.filter(a => cardMap.has(a))
-                : [];
-            const pageSize = getPageSize();
+            const groupAvatars = targetGroup ? targetGroup.personas.filter(a => cardMap.has(a)) : [];
             totalPages = Math.max(1, Math.ceil(groupAvatars.length / pageSize));
             if (state.page >= totalPages) state.page = totalPages - 1;
             if (state.page < 0) state.page = 0;
             const start = state.page * pageSize;
             pageItemsForDisplay = groupAvatars.slice(start, start + pageSize);
+            pageItemsForDisplay.forEach(a => shouldShow.add(a));
         } else {
             const ungroupedFiltered = ungroupedAvatars.filter(passFilter);
-            const pageSize = getPageSize();
             totalPages = Math.max(1, Math.ceil(ungroupedFiltered.length / pageSize));
             if (state.page >= totalPages) state.page = totalPages - 1;
             if (state.page < 0) state.page = 0;
             const start = state.page * pageSize;
             pageItemsForDisplay = ungroupedFiltered.slice(start, start + pageSize);
+            pageItemsForDisplay.forEach(a => shouldShow.add(a));
 
             if (!hidden) {
-                const fragmentsToPrepend = [];
+                const fragment = document.createDocumentFragment();
                 for (const g of groups) {
                     const visibleInGroup = g.personas.filter(a => cardMap.has(a) && passFilter(a));
                     const totalPersonasInGroup = g.personas.filter(a => cardMap.has(a)).length;
@@ -597,44 +797,41 @@ async function reorganizeNative() {
 
                     const body = document.createElement('div');
                     body.className = 'pg-group-body';
-                    if (!g.collapsed && totalPersonasInGroup > 0) {
-                        for (const a of g.personas) {
-                            if (cardMap.has(a) && passFilter(a)) {
-                                const card = cardMap.get(a);
-                                if (card) {
-                                    card.style.display = '';
-                                    body.appendChild(card);
-                                }
-                            }
+                    body.dataset.gid = g.id;
+                    // 折叠状态下也照样填充，折叠交给 CSS，这样折叠/展开只需切类，不重建 DOM
+                    if (totalPersonasInGroup > 0) {
+                        for (const a of visibleInGroup) {
+                            const card = cardMap.get(a);
+                            if (!card) continue;
+                            shouldShow.add(a);
+                            body.appendChild(card);
                         }
-                    } else if (!g.collapsed && totalPersonasInGroup === 0) {
+                    } else {
                         body.innerHTML = '<div class="pg-empty-hint">暂无人设，请用多选模式将人设移入此分组</div>';
                     }
                     wrapper.appendChild(body);
-                    fragmentsToPrepend.push(wrapper);
+                    fragment.appendChild(wrapper);
                 }
-                for (let i = fragmentsToPrepend.length - 1; i >= 0; i--) {
-                    block.insertBefore(fragmentsToPrepend[i], block.firstChild);
-                }
+                if (fragment.childNodes.length) block.insertBefore(fragment, block.firstChild);
             }
         }
 
         for (const a of pageItemsForDisplay) {
             const card = cardMap.get(a);
-            if (!card) continue;
-            card.style.display = '';
-            block.appendChild(card);
+            if (card) block.appendChild(card);
         }
 
+        for (const [id, card] of cardMap) setShown(card, shouldShow.has(id));
+
+        paintVisibleCards(cardMap.values());
         applySelectModeUI();
         bindWrappers(block);
         renderPager(totalPages);
     } finally {
+        _lastSig = computeListSignature();
         requestAnimationFrame(() => {
             isReorganizing = false;
-            if (scrollContainer && savedScrollTop > 0) {
-                scrollContainer.scrollTop = savedScrollTop;
-            }
+            if (scrollContainer && savedScrollTop > 0) scrollContainer.scrollTop = savedScrollTop;
         });
     }
 }
@@ -656,7 +853,7 @@ async function ensureAllCardsInDom() {
 
     await loadPersonaApi();
     if (_getUserAvatars) {
-        try { await _getUserAvatars(false); } catch(e) {}
+        try { await _getUserAvatars(false); } catch (e) {}
     }
 
     const presentAfter = new Set();
@@ -670,9 +867,11 @@ async function ensureAllCardsInDom() {
     const template = block.querySelector(':scope > .avatar-container');
     if (!template) return;
 
+    const frag = document.createDocumentFragment();
     for (const avatar of stillMissing) {
         const clone = template.cloneNode(true);
         clone.classList.remove('selected');
+        clone.dataset.pgClone = '1';
 
         clone.dataset.avatarId = avatar;
         clone.setAttribute('title', avatar);
@@ -680,55 +879,53 @@ async function ensureAllCardsInDom() {
             el.dataset.avatarId = avatar;
             el.setAttribute('title', avatar);
         });
+        _aidCache.set(clone, avatar);
 
+        // 关键：清掉从模板卡继承来的懒加载属性，否则会被还原成模板卡的头像
         clone.querySelectorAll('img').forEach(img => {
-            img.src = getAvatarUrl(avatar);
+            delete img.dataset.pgPainted;
+            delete img.dataset.pgFixAt;
+            delete img.dataset.pgFixN;
+            sanitizeLazyImg(img, getAvatarUrl(avatar));
             img.alt = getName(avatar);
-            img.removeAttribute('srcset');
         });
 
         clone.querySelectorAll('.ch_name, .character_name').forEach(el => {
             el.textContent = getName(avatar);
         });
 
-        // 修复：用真实描述填充 .ch_description
         const desc = (power_user.persona_descriptions || {})[avatar] || {};
-        const realDesc = desc.description || '';
         clone.querySelectorAll('.ch_description').forEach(el => {
-            el.textContent = realDesc;
+            el.textContent = desc.description || '';
         });
 
-        // ⭐ 修复：根据真实 title 决定显示/隐藏 .ch_additional_info
         const realTitle = (typeof desc.title === 'string') ? desc.title.trim() : '';
         const nameBlock = clone.querySelector('.character_name_block');
         let infoEl = clone.querySelector('.ch_additional_info');
         if (realTitle) {
-            // 有备注 —— 确保元素存在并填入真实备注
             if (!infoEl && nameBlock) {
                 infoEl = document.createElement('small');
                 infoEl.className = 'ch_additional_info';
                 nameBlock.appendChild(infoEl);
             }
             if (infoEl) infoEl.textContent = realTitle;
-        } else {
-            // 没备注 —— 移除元素（与 ST 原生行为一致）
-            if (infoEl) infoEl.remove();
+        } else if (infoEl) {
+            infoEl.remove();
         }
 
         delete clone.dataset.pgClickHooked;
 
-        clone.addEventListener('click', async (e) => {
+        clone.addEventListener('click', async () => {
             if (state.selectMode) return;
             const before = power_user.user_avatar;
             setTimeout(async () => {
-                if (power_user.user_avatar === before) {
-                    await switchPersona(avatar);
-                }
+                if (power_user.user_avatar === before) await switchPersona(avatar);
             }, 50);
         });
 
-        block.appendChild(clone);
+        frag.appendChild(clone);
     }
+    block.appendChild(frag);
 }
 
 function applySelectModeUI() {
@@ -754,7 +951,8 @@ function applySelectModeUI() {
             e.stopPropagation();
             if (state.selected.has(id)) state.selected.delete(id);
             else state.selected.add(id);
-            applySelectModeUI();
+            c.classList.toggle('pg-checked', state.selected.has(id));
+            cb.checked = state.selected.has(id);
             updateSelectionCount();
         });
 
@@ -778,11 +976,15 @@ function interceptInSelectMode(e) {
     if (e.target.classList.contains('pg-check')) return;
     e.stopPropagation();
     e.preventDefault();
-    const id = getCardAvatarId(e.currentTarget);
+    const card = e.currentTarget;
+    const id = getCardAvatarId(card);
     if (!id) return;
     if (state.selected.has(id)) state.selected.delete(id);
     else state.selected.add(id);
-    applySelectModeUI();
+    // 只更新这一张卡，不重建整个列表
+    card.classList.toggle('pg-checked', state.selected.has(id));
+    const cb = card.querySelector('.pg-check');
+    if (cb) cb.checked = state.selected.has(id);
     updateSelectionCount();
 }
 
@@ -794,8 +996,18 @@ function bindWrappers(block) {
             header.dataset.pgBound = '1';
             header.addEventListener('click', e => {
                 if (e.target.closest('.pg-group-actions')) return;
-                toggleCollapse(gid);
-                refreshMain();
+                // 折叠只切类 + 存状态，不重排列表（消除闪烁）
+                const wrapper = header.closest('.pg-group-wrapper');
+                const next = !isCollapsed(gid);
+                setCollapsed(gid, next);
+                if (wrapper) wrapper.classList.toggle('pg-collapsed', next);
+                // 展开时懒加载插件会重新处理这批图，稍后校验一次
+                if (!next && wrapper) {
+                    clearTimeout(window.__pg_expand_repair);
+                    window.__pg_expand_repair = setTimeout(() => {
+                        wrapper.querySelectorAll('.avatar-container img').forEach(repairOneImg);
+                    }, 400);
+                }
             });
         }
         const rn = div.querySelector('.pg-btn-rename');
@@ -805,7 +1017,14 @@ function bindWrappers(block) {
                 e.stopPropagation();
                 const cur = (getGroups().find(x => x.id === gid) || {}).name || '';
                 const n = prompt('重命名：', cur);
-                if (n && n.trim()) { renameGroup(gid, n.trim()); refreshMain(); }
+                if (n && n.trim()) {
+                    renameGroup(gid, n.trim());
+                    // 只改标题文字 + 工具栏下拉，不重排列表
+                    const nameEl = div.querySelector('.pg-group-name');
+                    if (nameEl) nameEl.textContent = n.trim();
+                    renderToolbar();
+                    _lastSig = computeListSignature();
+                }
             });
         }
         const db = div.querySelector('.pg-btn-delgroup');
@@ -833,7 +1052,7 @@ function initQuick() {
 
         const $btn = window.jQuery(
             '<div id="' + BTN_ID + '" class="interactable" tabindex="0" title="人设分组（快捷切换）" role="button">' +
-            '<img class="pg-quick-btn-img" alt="">' +
+            '<img class="pg-quick-btn-img" alt="" loading="eager" data-pg-no-lazy="1">' +
             '<i class="fa-solid fa-user-circle pg-fallback-icon" style="display:none;"></i>' +
             '</div>'
         );
@@ -872,7 +1091,7 @@ function updateQuickBtnAvatar() {
     let cur = power_user.user_avatar || power_user.default_persona;
     if (!cur) {
         const sel = document.querySelector('#user_avatar_block .avatar-container.selected [data-avatar-id]')
-                 || document.querySelector('#user_avatar_block [data-avatar-id].selected');
+            || document.querySelector('#user_avatar_block [data-avatar-id].selected');
         if (sel) cur = sel.dataset.avatarId;
     }
     if (!cur) {
@@ -880,9 +1099,8 @@ function updateQuickBtnAvatar() {
         if (first) cur = first.dataset.avatarId;
     }
     if (cur) {
-        const newSrc = getAvatarUrl(cur);
         if (img.getAttribute('data-current') !== cur) {
-            img.src = newSrc;
+            sanitizeLazyImg(img, getAvatarUrl(cur));
             img.alt = getName(cur);
             img.setAttribute('data-current', cur);
         }
@@ -922,7 +1140,7 @@ function closeQuick() {
     if (!p) return;
     p.style.display = 'none';
     if (_popperInstance) {
-        try { _popperInstance.destroy(); } catch(e) {}
+        try { _popperInstance.destroy(); } catch (e) {}
         _popperInstance = null;
     }
 }
@@ -936,7 +1154,7 @@ async function positionQuick(p) {
     if (Popper && typeof Popper.createPopper === 'function') {
         try {
             if (_popperInstance) {
-                try { _popperInstance.destroy(); } catch(e) {}
+                try { _popperInstance.destroy(); } catch (e) {}
                 _popperInstance = null;
             }
             p.style.position = '';
@@ -995,7 +1213,7 @@ function renderQuick() {
         const ps = g.personas.filter(a => all.includes(a));
         ps.forEach(a => grouped.add(a));
         if (ps.length === 0) continue;
-        h += '<div class="pg-quick-group' + (g.collapsed?' pg-collapsed':'') + '" data-gid="' + g.id + '">';
+        h += '<div class="pg-quick-group' + (g.collapsed ? ' pg-collapsed' : '') + '" data-gid="' + g.id + '">';
         h += '<div class="pg-quick-group-header"><i class="fa-solid fa-chevron-down"></i><span>' + esc(g.name) + '</span><span class="pg-quick-count">' + ps.length + '</span></div>';
         h += '<div class="pg-quick-grid">';
         for (const a of ps) h += renderQuickAv(a);
@@ -1019,18 +1237,30 @@ function renderQuick() {
         setTimeout(updateQuickBtnAvatar, 50);
         closeQuick();
     });
+    // 弹窗内折叠也只切类，不重建 innerHTML（避免头像重新创建导致闪烁）
     window.jQuery(p).find('.pg-quick-group-header').on('click', async function (e) {
         e.preventDefault();
         e.stopPropagation();
-        toggleCollapse(this.parentElement.dataset.gid);
-        renderQuick();
+        const groupEl = this.parentElement;
+        const gid = groupEl.dataset.gid;
+        const next = !isCollapsed(gid);
+        setCollapsed(gid, next);
+        groupEl.classList.toggle('pg-collapsed', next);
         const popup = document.getElementById(POPUP_ID);
         if (popup) await positionQuick(popup);
     });
 }
 
+// hover 提示：名字 + 备注(title)
 function renderQuickAv(a) {
-    return '<div class="pg-quick-avatar' + (isCurrent(a)?' pg-current':'') + '" data-avatar="' + esc(a) + '" title="' + esc(getName(a)) + '"><img src="' + getAvatarUrl(a) + '"></div>';
+    const name = getName(a);
+    const titleNote = getPersonaTitle(a);
+    const tooltip = titleNote ? (name + '\n' + titleNote) : name;
+    const url = getAvatarUrl(a);
+    return '<div class="pg-quick-avatar' + (isCurrent(a) ? ' pg-current' : '') + '" data-avatar="' + esc(a) + '" title="' + esc(tooltip) + '">'
+        + '<img src="' + url + '" loading="eager" data-pg-no-lazy="1"'
+        + ' style="background-image:url(&quot;' + url + '&quot;);background-size:cover;background-position:center;">'
+        + '</div>';
 }
 
 // ========== 入口 ==========
@@ -1039,27 +1269,32 @@ jQuery(async () => {
     initStorage();
     await loadPersonaApi();
     loadPopper();
-    await refreshValidAvatars();
+    await refreshValidAvatars(true);
 
-    try { initExtensionSettings(); console.log('[' + EXT_NAME + '] Settings panel initialized.'); }
-    catch (err) { console.error('[' + EXT_NAME + '] Settings panel init failed:', err); }
-
-    try { initMainPanel(); console.log('[' + EXT_NAME + '] Main panel initialized.'); }
-    catch (err) { console.error('[' + EXT_NAME + '] Main panel init failed:', err); }
+    try { initExtensionSettings(); } catch (err) { console.error('[' + EXT_NAME + '] Settings panel init failed:', err); }
+    try { initMainPanel(); } catch (err) { console.error('[' + EXT_NAME + '] Main panel init failed:', err); }
 
     if (isQuickEnabled() && !isStQuickPersonaEnabled()) {
-        try { initQuick(); console.log('[' + EXT_NAME + '] Quick panel initialized.'); }
-        catch (err) { console.error('[' + EXT_NAME + '] Quick panel init failed:', err); }
+        try { initQuick(); } catch (err) { console.error('[' + EXT_NAME + '] Quick panel init failed:', err); }
     } else if (isStQuickPersonaEnabled()) {
         console.log('[' + EXT_NAME + '] Quick popup skipped (ST Quick Persona is enabled).');
-    } else {
-        console.log('[' + EXT_NAME + '] Quick popup disabled by user settings.');
     }
 
-    const refreshAll = async () => {
-        await refreshValidAvatars();
-        try { refreshMain(); } catch(e){}
-        try { refreshQuick(); } catch(e){}
+    // 事件刷新：合并节流 + 面板不可见时挂起 + 内容没变就跳过
+    let _refreshTimer = null;
+    const refreshAll = () => {
+        clearTimeout(_refreshTimer);
+        _refreshTimer = setTimeout(async () => {
+            await refreshValidAvatars();
+            try { refreshQuick(); } catch (e) {}
+            if (!isPanelVisible()) { markPendingRefresh(); return; }
+            // 绑定筛选依赖锁定状态，切人设可能改变它，这种情况必须重排
+            const mustRefresh = (state.filter === 'bound' || state.filter === 'unbound');
+            const sig = computeListSignature();
+            if (!mustRefresh && sig === _lastSig) return;
+            _lastSig = sig;
+            try { refreshMain(); } catch (e) {}
+        }, 250);
     };
     if (eventSource && event_types) {
         if (event_types.SETTINGS_UPDATED) eventSource.on(event_types.SETTINGS_UPDATED, refreshAll);
@@ -1068,18 +1303,37 @@ jQuery(async () => {
 
     const obs = document.getElementById('user_avatar_block');
     if (obs) {
+        let lastCardCount = obs.querySelectorAll('.avatar-container').length;
+
+        // 只有卡片总数真的变化才重排；容器间搬动 / class 变化一律忽略（消除闪烁）
         new MutationObserver(() => {
             if (isReorganizing) return;
+            const now = obs.querySelectorAll('.avatar-container').length;
+            if (now === lastCardCount) return;
+            lastCardCount = now;
             clearTimeout(window.__pg_reorg_timer);
-            window.__pg_reorg_timer = setTimeout(reorganizeNative, 100);
-        }).observe(obs, { childList: true, subtree: false });
+            window.__pg_reorg_timer = setTimeout(() => {
+                Promise.resolve(reorganizeNative()).then(() => {
+                    lastCardCount = obs.querySelectorAll('.avatar-container').length;
+                });
+            }, 150);
+        }).observe(obs, { childList: true, subtree: true });
+
+        // 懒加载兼容：只修被改坏的单张图，带次数上限
+        new MutationObserver(muts => {
+            if (isReorganizing) return;
+            for (const m of muts) {
+                const t = m.target;
+                if (t && t.tagName === 'IMG') repairOneImg(t);
+            }
+        }).observe(obs, { attributes: true, attributeFilter: ['src'], subtree: true });
     }
 
     window.addEventListener('resize', () => {
         const p = document.getElementById(POPUP_ID);
         if (p && p.style.display !== 'none') {
             if (_popperInstance) {
-                try { _popperInstance.update(); } catch(e) {}
+                try { _popperInstance.update(); } catch (e) {}
             } else {
                 positionQuick(p);
             }
